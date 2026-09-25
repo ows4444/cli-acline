@@ -9,7 +9,7 @@
 #   ACLINE_BACKUP       1 keeps the old binary as acline.bak-<timestamp> (default: 1)
 set -euo pipefail
 
-REPO="ows4444/ACLine"
+REPO="ows4444/cli-acline"
 BIN_NAME="acline"
 INSTALL_DIR="${ACLINE_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${ACLINE_VERSION:-latest}"
