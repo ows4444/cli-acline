@@ -20,7 +20,7 @@
 <meta name="twitter:description" content="Specs, tasks, decisions and a tamper-evident audit trail in one SQLite file. A completion gate that refuses to lie for an agent.">
 
 <meta name="theme-color" content="#0b1220">
-<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Crect width='256' height='256' rx='56' fill='%232563eb'/%3E%3Cpath d='M56,192 C82,192 82,150 110,150 C138,150 138,108 166,108 C185,108 190,100 200,86' fill='none' stroke='white' stroke-width='13' stroke-linecap='round' stroke-linejoin='round'/%3E%3Ccircle cx='56' cy='192' r='14' fill='white'/%3E%3Ccircle cx='110' cy='150' r='14' fill='white'/%3E%3Ccircle cx='166' cy='108' r='14' fill='white'/%3E%3Ccircle cx='200' cy='86' r='14' fill='white'/%3E%3C/svg%3E">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 256 256'%3E%3Cdefs%3E%3CradialGradient id='bg' cx='38%25' cy='35%25' r='75%25'%3E%3Cstop offset='0%25' stop-color='%231c3252'/%3E%3Cstop offset='100%25' stop-color='%230a1526'/%3E%3C/radialGradient%3E%3ClinearGradient id='cy' x1='0%25' y1='100%25' x2='100%25' y2='0%25'%3E%3Cstop offset='0%25' stop-color='%2322d3ee'/%3E%3Cstop offset='100%25' stop-color='%2393c5fd'/%3E%3C/linearGradient%3E%3C/defs%3E%3Crect width='256' height='256' rx='56' fill='url(%23bg)'/%3E%3Cpath d='M62,150 L98,186 L62,222' fill='none' stroke='url(%23cy)' stroke-width='16' stroke-linecap='round' stroke-linejoin='round'/%3E%3Crect x='106' y='214' width='44' height='16' rx='8' fill='url(%23cy)'/%3E%3Cpath d='M112,192 C128,200 138,182 152,172 C166,162 172,144 190,128' fill='none' stroke='url(%23cy)' stroke-width='9' stroke-linecap='round' stroke-dasharray='1 17'/%3E%3Cg transform='translate(203,112) rotate(45)'%3E%3Cpath d='M0,-34 C10,-20 12,-4 12,12 L7,12 L7,22 L-7,22 L-7,12 L-12,12 C-12,-4 -10,-20 0,-34 Z' fill='url(%23cy)'/%3E%3Cpath d='M-7,8 L-20,24 L-7,19 Z' fill='url(%23cy)'/%3E%3Cpath d='M7,8 L20,24 L7,19 Z' fill='url(%23cy)'/%3E%3Ccircle cx='0' cy='-8' r='4' fill='%230a1526'/%3E%3C/g%3E%3C/svg%3E">
 
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -92,12 +92,35 @@
   <div class="mx-auto max-w-5xl px-6 h-16 flex items-center justify-between">
     <a href="#" class="flex items-center gap-2 font-semibold tracking-tight">
       <svg width="26" height="26" viewBox="0 0 256 256" aria-hidden="true">
-        <rect width="256" height="256" rx="56" fill="#2563eb"/>
-        <path d="M56,192 C82,192 82,150 110,150 C138,150 138,108 166,108 C185,108 190,100 200,86" fill="none" stroke="white" stroke-width="13" stroke-linecap="round" stroke-linejoin="round"/>
-        <circle cx="56" cy="192" r="14" fill="white"/>
-        <circle cx="110" cy="150" r="14" fill="white"/>
-        <circle cx="166" cy="108" r="14" fill="white"/>
-        <circle cx="200" cy="86" r="14" fill="white"/>
+        <defs>
+          <radialGradient id="logo-bg" cx="38%" cy="35%" r="75%">
+            <stop offset="0%" stop-color="#1c3252"/>
+            <stop offset="100%" stop-color="#0a1526"/>
+          </radialGradient>
+          <linearGradient id="logo-cy" x1="0%" y1="100%" x2="100%" y2="0%">
+            <stop offset="0%" stop-color="#22d3ee"/>
+            <stop offset="100%" stop-color="#93c5fd"/>
+          </linearGradient>
+          <filter id="logo-glow" x="-60%" y="-60%" width="220%" height="220%">
+            <feGaussianBlur stdDeviation="7" result="b"/>
+            <feMerge>
+              <feMergeNode in="b"/>
+              <feMergeNode in="SourceGraphic"/>
+            </feMerge>
+          </filter>
+        </defs>
+        <rect width="256" height="256" rx="56" fill="url(#logo-bg)"/>
+        <g filter="url(#logo-glow)">
+          <path d="M62,150 L98,186 L62,222" fill="none" stroke="url(#logo-cy)" stroke-width="16" stroke-linecap="round" stroke-linejoin="round"/>
+          <rect x="106" y="214" width="44" height="16" rx="8" fill="url(#logo-cy)"/>
+          <path d="M112,192 C128,200 138,182 152,172 C166,162 172,144 190,128" fill="none" stroke="url(#logo-cy)" stroke-width="9" stroke-linecap="round" stroke-dasharray="1 17"/>
+          <g transform="translate(203,112) rotate(45)">
+            <path d="M0,-34 C10,-20 12,-4 12,12 L7,12 L7,22 L-7,22 L-7,12 L-12,12 C-12,-4 -10,-20 0,-34 Z" fill="url(#logo-cy)"/>
+            <path d="M-7,8 L-20,24 L-7,19 Z" fill="url(#logo-cy)"/>
+            <path d="M7,8 L20,24 L7,19 Z" fill="url(#logo-cy)"/>
+            <circle cx="0" cy="-8" r="4" fill="#0a1526"/>
+          </g>
+        </g>
       </svg>
       ACLine
     </a>
