@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  go:
+    name: go (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build
+        run: go build ./internal/... .
+
+      - name: Vet
+        run: go vet ./internal/... .
+
+      # The hooks are Go now (`acline hook <event>`), so their tests run here too.
+      # The race detector is the reason the guard's wall-clock test widens its
+      # budget when it runs under -race (see raceEnabled in internal/cmd).
+      - name: Test (race detector)
+        run: go test -race -count=1 -coverprofile=coverage.out ./internal/... .
+
+      - name: Coverage
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go tool cover -func=coverage.out | tail -1
+          go tool cover -func=coverage.out | tail -1 >> "$GITHUB_STEP_SUMMARY"
+
+      # A short run per push; the seed corpus already runs in the test step.
+      # Invariant: the guard never clears a dangerous command bash would run.
+      - name: Fuzz the guard's shell lexer
+        if: matrix.os == 'ubuntu-latest'
+        run: |
+          go test ./internal/cmd -run '^$' -fuzz '^FuzzBashScanTargets$' -fuzztime 30s
+          go test ./internal/cmd -run '^$' -fuzz '^FuzzBashScanTargetsNeverPanics$' -fuzztime 30s
+
+  static:
+    name: static analysis
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: gofmt
+        run: |
+          unformatted="$(gofmt -l main.go internal)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt needed on:"; echo "$unformatted"; exit 1
+          fi
+
+      - name: go.mod is tidy
+        run: go mod tidy -diff
+
+      - name: staticcheck
+        run: go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./internal/... .
+
+      - name: Windows still compiles
+        run: GOOS=windows GOARCH=amd64 go build -o /dev/null .
+
+  vulncheck:
+    name: govulncheck
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: govulncheck
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./internal/... .

@@ -1,0 +1,47 @@
+name: Release
+
+# A v* tag builds the CLI archives (.goreleaser.yaml), attaches them to a
+# *draft* GitHub release with checksums, a cosign-signed checksum file,
+# SBOMs and build-provenance attestations, and stops there: a person
+# reviews the draft and publishes it.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: read
+
+jobs:
+  cli:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write     # create the draft release
+      id-token: write     # cosign keyless signing and attestations
+      attestations: write
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: sigstore/cosign-installer@v3
+
+      - uses: anchore/sbom-action/download-syft@v0
+
+      - uses: goreleaser/goreleaser-action@v6
+        with:
+          version: "~> v2"
+          args: release --clean
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - uses: actions/attest-build-provenance@v2
+        with:
+          subject-path: |
+            dist/*.tar.gz
+            dist/*.zip
+            dist/checksums.txt
