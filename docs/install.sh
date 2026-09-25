@@ -52,7 +52,7 @@ tag="$(printf '%s' "$release_json" | grep -m1 '"tag_name"' | sed -E 's/.*"tag_na
 [ -n "$tag" ] || die "couldn't determine release tag from GitHub API response"
 ver="${tag#v}"
 
-archive="${BIN_NAME}_${goos}_${goarch}.tar.gz"
+archive="${BIN_NAME}_${ver}_${goos}_${goarch}.tar.gz"
 base_url="https://github.com/$REPO/releases/download/$tag"
 
 tmpdir="$(mktemp -d)"
