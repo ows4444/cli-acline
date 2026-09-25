@@ -1,0 +1,24 @@
+# Go build artifacts
+/acline
+*.exe
+*.test
+
+# sqlite databases (test and scratch stores; the real store lives outside the
+# repo, in ~/.acline or $ACLINE_DB)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# hook-local state
+.claude/vault/.state/
+
+# editor/OS
+.DS_Store
+
+# Makefile build output
+bin/
+
+# goreleaser output
+/dist/
+coverage.out

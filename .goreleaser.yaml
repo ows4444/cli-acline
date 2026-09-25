@@ -1,0 +1,47 @@
+# Release build for the acline CLI: `goreleaser release --clean` on a v* tag
+# (.github/workflows/release.yml). Produces per-platform archives, a checksum
+# file signed keyless with cosign, and an SBOM per archive. The release is a
+# draft: a person reads it and publishes it.
+version: 2
+
+project_name: acline
+
+builds:
+  - id: acline
+    main: .
+    binary: acline
+    env:
+      - CGO_ENABLED=0 # modernc.org/sqlite is pure Go
+    goos: [linux, darwin, windows]
+    goarch: [amd64, arm64]
+    flags: [-trimpath]
+    ldflags:
+      - -s -w -X acline/internal/cmd.version={{ .Tag }} -X acline/internal/cmd.commit={{ .ShortCommit }} -X acline/internal/cmd.date={{ .CommitDate }}
+    mod_timestamp: "{{ .CommitTimestamp }}"
+
+archives:
+  - formats: [tar.gz]
+    format_overrides:
+      - goos: windows
+        formats: [zip]
+    files: [README.md, CHANGELOG.md, SECURITY.md, LICENSE*]
+
+checksum:
+  name_template: checksums.txt
+
+sboms:
+  - artifacts: archive
+
+signs:
+  - cmd: cosign
+    artifacts: checksum
+    signature: "${artifact}.sigstore.json"
+    args: ["sign-blob", "--bundle=${signature}", "${artifact}", "--yes"]
+
+changelog:
+  disable: true # CHANGELOG.md is written by hand
+
+release:
+  draft: true
+  footer: |
+    Verify: `cosign verify-blob --bundle checksums.txt.sigstore.json --certificate-identity-regexp 'https://github.com/{{ .Env.GITHUB_REPOSITORY }}/' --certificate-oidc-issuer https://token.actions.githubusercontent.com checksums.txt`, then `sha256sum -c checksums.txt --ignore-missing`. Build provenance: `gh attestation verify <file> --repo {{ .Env.GITHUB_REPOSITORY }}`.
