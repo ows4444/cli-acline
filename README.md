@@ -61,7 +61,7 @@ make generate   # regenerate the VS Code extension's TypeScript types from the M
 
 **Claude Code plugin.** `acline plugin export <dir>` writes acline's skills and agents as one versioned plugin (`claude --plugin-dir <dir>`), instead of the copies `acline init` puts in each repo. The guard hooks, deny rules and agent identity can't live in a plugin, so still run `acline init` in each project.
 
-The VS Code extension lives in `vscode-acline/` and is documented there.
+The VS Code extension ([ACLine AI](https://marketplace.visualstudio.com/items?itemName=ows4444.acline-ai)) lives in its own repo, `vscode-acline`.
 
 ## License
 

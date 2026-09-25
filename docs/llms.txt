@@ -1,4 +1,4 @@
-# acline
+# ACLine
 
 > A local SDLC tracker for coding agents. Specs, tasks, decisions, verification
 > results, approvals and an append-only audit trail live in one SQLite file,
@@ -18,4 +18,4 @@ Install: `curl -fsSL https://acline.nizaami.com/install.sh | bash`
 
 ## Related
 
-- [VS Code extension](https://github.com/ows4444/vscode-acline): browse and act on the store from the editor
+- [VS Code extension](https://marketplace.visualstudio.com/items?itemName=ows4444.acline-ai): browse and act on the store from the editor
