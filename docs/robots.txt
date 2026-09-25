@@ -1,0 +1,4 @@
+User-agent: *
+Allow: /
+
+Sitemap: https://acline.nizaami.com/sitemap.xml

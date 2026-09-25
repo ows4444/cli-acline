@@ -1,0 +1,21 @@
+# acline
+
+> A local SDLC tracker for coding agents. Specs, tasks, decisions, verification
+> results, approvals and an append-only audit trail live in one SQLite file,
+> driven by the acline CLI, an MCP server, and Claude Code hooks. A task
+> completes only when the store holds the checks and approvals its risk
+> requires — "the agent said it's done" is never the evidence.
+
+Install: `curl -fsSL https://acline.nizaami.com/install.sh | bash`
+
+## Docs
+
+- [README](https://github.com/ows4444/cli-acline#readme): overview, install, quickstart, command reference
+- [Architecture](https://github.com/ows4444/cli-acline/blob/main/docs/ARCHITECTURE.md): packages, data flow, authority model, hooks, MCP, orchestrator
+- [Threat model](https://github.com/ows4444/cli-acline/blob/main/docs/THREAT_MODEL.md): what is protected, from whom, what is enforced and what is not
+- [Changelog](https://github.com/ows4444/cli-acline/blob/main/CHANGELOG.md): behavior changes
+- [Security policy](https://github.com/ows4444/cli-acline/blob/main/SECURITY.md): reporting a vulnerability
+
+## Related
+
+- [VS Code extension](https://github.com/ows4444/vscode-acline): browse and act on the store from the editor
