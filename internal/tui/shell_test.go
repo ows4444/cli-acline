@@ -45,9 +45,26 @@ func newSession(t *testing.T, st *store.Store, screens ...screen) *tuitest.Sessi
 	return s
 }
 
+// showsWithin is how long shows waits for the screen to catch up.
+const showsWithin = 10 * time.Second
+
+// shows waits for every want to be on the screen. Keys returns once the frame
+// looks settled, which it judges by counting updates: an update that was not
+// the key's (the store watch's tick, a late startup message) satisfies the
+// count, and on a slow machine the key is then still unread when Keys returns.
 func shows(t *testing.T, s *tuitest.Session, wants ...string) {
 	t.Helper()
 	got := rendered(s)
+	for deadline := time.Now().Add(showsWithin); time.Now().Before(deadline); got = rendered(s) {
+		missing := false
+		for _, w := range wants {
+			missing = missing || !strings.Contains(got, w)
+		}
+		if !missing {
+			return
+		}
+		time.Sleep(5 * time.Millisecond)
+	}
 	for _, w := range wants {
 		if !strings.Contains(got, w) {
 			t.Errorf("screen lacks %q:\n%s", w, got)
