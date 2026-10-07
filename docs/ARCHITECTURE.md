@@ -27,7 +27,7 @@ acline is one Go binary (`main.go` → `internal/cmd`) over one SQLite database.
 | `internal/store` | The whole data model and **every rule**: schema and migrations, the completion gate, approvals and seals, the audit chain, authority checks, search, snapshots. Depends on nothing above it. |
 | `internal/app` | Use-cases the adapters share (project/role resolution, approve/reject, the dashboard view). |
 | `internal/cmd` | The cobra CLI, the guard (`guard*.go`), the hooks (`hook.go`), `doctor`. Each command is built by a constructor around one `cli` (the store, plus what a test replaces); no package-level state. |
-| `internal/tui` | The terminal UI (`acline tui`): a third adapter, for a person. The only package that imports `github.com/ows4444/tui` (pinned to a commit; a test enforces the boundary). |
+| `internal/tui` | The terminal UI (`acline tui`): a third adapter, for a person. The only package that imports `github.com/ows4444/tui` (pinned to a tagged release; a test enforces the boundary). |
 | `internal/mcp` | The MCP server: tools, a resource, and middleware (session policy, stable `error_code`s, client-version warning). Also generates the VS Code extension's TypeScript types. |
 | `internal/orchestrate` | Runs one bounded agent step (`step`, `run`, `plan`, `spec`, `research`) and re-reads recorded state to decide what happens next. |
 | `internal/brief`, `internal/untrusted` | Assemble an agent's prompt; fence recorded text as data. |
