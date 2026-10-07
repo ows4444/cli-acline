@@ -284,28 +284,27 @@ func checkBashCommandWarnings(cmd string) string {
 // options occur, in either order" because Go's regexp engine has no lookahead.
 func hasRecursiveForcedRemove(cmd string) bool {
 	for _, segment := range segmentSplitRe.Split(cmd, -1) {
+		// Right to left, so recursive and force describe every field after
+		// the one in hand: one pass, where rescanning the tail for each `rm`
+		// was quadratic in a segment of many `rm` words.
 		fields := strings.Fields(segment)
-		for i, field := range fields {
-			if filepath.Base(field) != "rm" {
-				continue
-			}
-			var recursive, force bool
-			for _, arg := range fields[i+1:] {
-				switch arg {
-				case "--recursive":
-					recursive = true
-				case "--force":
-					force = true
-				default:
-					if strings.HasPrefix(arg, "-") && !strings.HasPrefix(arg, "--") {
-						flags := strings.TrimPrefix(arg, "-")
-						recursive = recursive || strings.Contains(flags, "r") || strings.Contains(flags, "R")
-						force = force || strings.Contains(flags, "f")
-					}
-				}
-			}
-			if recursive && force {
+		var recursive, force bool
+		for i := len(fields) - 1; i >= 0; i-- {
+			field := fields[i]
+			if recursive && force && filepath.Base(field) == "rm" {
 				return true
+			}
+			switch field {
+			case "--recursive":
+				recursive = true
+			case "--force":
+				force = true
+			default:
+				if strings.HasPrefix(field, "-") && !strings.HasPrefix(field, "--") {
+					flags := strings.TrimPrefix(field, "-")
+					recursive = recursive || strings.Contains(flags, "r") || strings.Contains(flags, "R")
+					force = force || strings.Contains(flags, "f")
+				}
 			}
 		}
 	}
