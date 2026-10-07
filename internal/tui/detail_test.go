@@ -24,6 +24,7 @@ func detailSession(t *testing.T, w, h int) (*tuitest.Session, int64) {
 	s := tuitest.New(m, w, h)
 	t.Cleanup(s.Close)
 	s.Keys("enter")
+	shows(t, s, "#1 ship the login fix") // the detail is open before the test reads the screen
 	return s, id
 }
 

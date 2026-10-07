@@ -85,6 +85,7 @@ The completion gate can no longer be bypassed by an agent without the approval t
 
 ### Fixed
 
+- **The guard stays fast on a long command.** The check for `rm` with both a recursive and a force flag rescanned the rest of a command for every `rm` word, so its time grew with the square of the command's length: about 0.4 s on a 60 KB command of `rm` words, and over the hook's 10 s limit (a denied call) on larger ones. It now reads each command once.
 - **Every refusal of an agent has an MCP `error_code`.** Eight had none, so a client could not tell "a person must do this" from any other failure: `agent_cannot_accept_decision`, `agent_cannot_retire_decision`, `agent_cannot_approve_spec`, `agent_cannot_retire_spec`, `agent_cannot_decide_plan`, `agent_cannot_configure_runner`, `agent_cannot_self_promote`, `agent_cannot_reseal`.
 - **`acline export` is the full record it says it is.** It left out projects, roles, milestones, check runners and plans (with their items, dependencies and criteria); it now exports every table a snapshot backs up (still never the approval-token hash or embeddings). With `--since`, plan items, edges and criteria follow their plan's date.
 - **The store the project uses is the one its settings deny.** `acline init` wrote `Read`/`Edit(~/.acline/**)` whatever the store was; with `--db`, `ACLINE_DB` or `XDG_DATA_HOME` the real store was not covered. It now denies that file (and its `-wal`/`-shm` files), never its whole folder, and adds `Write` next to `Read` and `Edit`. Run `acline init --upgrade` in an existing project to add the rules.

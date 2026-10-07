@@ -30,6 +30,7 @@ func actionSession(t *testing.T, opts store.TaskOpts) (*tuitest.Session, *store.
 	s := tuitest.New(m, 160, 40)
 	t.Cleanup(s.Close)
 	s.Keys("enter")
+	shows(t, s, "#1 ship the login fix") // the detail is open before the test reads the screen
 	return s, st
 }
 
