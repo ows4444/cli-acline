@@ -3,6 +3,7 @@ package mcp
 import (
 	"context"
 	"os"
+	"path/filepath"
 	"regexp"
 	"testing"
 )
@@ -14,9 +15,9 @@ import (
 // is out of date" warning. This test reads the TypeScript source and holds it
 // to the server's real tool set, so the two can't drift silently.
 func TestExtensionRequiredToolsAreAllRegistered(t *testing.T) {
-	src, err := os.ReadFile("../../vscode-acline/src/mcpClient.ts")
+	src, err := os.ReadFile(filepath.Join(ExtensionDir("../.."), "src", "mcpClient.ts"))
 	if err != nil {
-		t.Skipf("extension source not present: %v", err)
+		t.Skip(extensionMissing(err))
 	}
 	block := regexp.MustCompile(`(?s)export const REQUIRED_TOOLS = \[(.*?)\];`).FindSubmatch(src)
 	if block == nil {

@@ -1,4 +1,6 @@
 # ACLine: build and install the CLI and the VS Code extension, one step at a time.
+# The extension lives in its own repository (vscode-acline); the ext-* targets use
+# the checkout at EXT_DIR, by default next to this one.
 #
 #   make            show this help
 #   make install    build + install the CLI, then build + install the extension
@@ -7,7 +9,7 @@
 #   make install-cli        build the CLI and put it on your PATH
 #   make install-ext        build, package and install the extension into VS Code
 #
-# Overridable: BINDIR, CODE, VERSION, BACKUP, BACKUP_DIR, STORE (see `make help`).
+# Overridable: BINDIR, CODE, VERSION, BACKUP, BACKUP_DIR, STORE, EXT_DIR (see `make help`).
 
 SHELL := /bin/bash
 .DEFAULT_GOAL := help
@@ -31,15 +33,20 @@ BACKUP_DIR ?= $(HOME)/.acline-backups
 
 # --- Extension ---------------------------------------------------------
 CODE        ?= code
-EXT_DIR     := vscode-acline
-EXT_NAME    := $(shell node -p "require('./$(EXT_DIR)/package.json').name" 2>/dev/null)
-EXT_PUB     := $(shell node -p "require('./$(EXT_DIR)/package.json').publisher" 2>/dev/null)
-EXT_VERSION := $(shell node -p "require('./$(EXT_DIR)/package.json').version" 2>/dev/null)
+# The extension's own repository. go generate and the Go tests that read its
+# source find it through ACLINE_EXT_DIR, so they look where make does.
+EXT_DIR     ?= ../vscode-acline
+EXT_ABS     := $(abspath $(EXT_DIR))
+export ACLINE_EXT_DIR := $(EXT_ABS)
+EXT_FOUND   := $(wildcard $(EXT_ABS)/package.json)
+EXT_NAME    := $(shell node -p "require('$(EXT_ABS)/package.json').name" 2>/dev/null)
+EXT_PUB     := $(shell node -p "require('$(EXT_ABS)/package.json').publisher" 2>/dev/null)
+EXT_VERSION := $(shell node -p "require('$(EXT_ABS)/package.json').version" 2>/dev/null)
 EXT_ID      := $(EXT_PUB).$(EXT_NAME)
-VSIX        := $(EXT_DIR)/$(EXT_NAME)-$(EXT_VERSION).vsix
+VSIX        := $(EXT_ABS)/$(EXT_NAME)-$(EXT_VERSION).vsix
 VSCE        ?= npx --yes @vscode/vsce
 
-.PHONY: help all build install check vuln cyclo generate cli install-cli backup-store ext-deps ext-build ext-test ext-package install-ext versions clean
+.PHONY: help all build install check vuln cyclo generate cli install-cli backup-store ext-found ext-deps ext-build ext-test ext-package install-ext versions clean
 
 help: ## Show this help
 	@echo "ACLine build and install"
@@ -52,23 +59,23 @@ help: ## Show this help
 	@echo "  BACKUP_DIR=$(BACKUP_DIR)   where backup-store writes"
 	@echo "  VERSION=            stamp a release version into the CLI (default: VCS info)"
 	@echo "  CODE=$(CODE)             the VS Code CLI used by install-ext"
+	@echo "  EXT_DIR=$(EXT_DIR)   the vscode-acline checkout (its own repository)"
 	@echo
-	@echo "Extension: $(EXT_ID) $(EXT_VERSION)  ->  $(VSIX)"
+	@echo "Extension: $(if $(EXT_FOUND),$(EXT_ID) $(EXT_VERSION)  ->  $(VSIX),not found at $(EXT_ABS))"
 
-all: build ## Build the CLI and package the extension (installs nothing)
-build: cli ext-package
+all: cli ext-package ## Build the CLI and package the extension (installs nothing)
+build: cli ## Build the CLI (the extension is built from its own repository: make ext-package)
 
 install: install-cli install-ext ## Install the CLI, then the extension, one after the other
 	@echo
 	@echo "Done. Restart VS Code (or run 'Developer: Reload Window') so the extension starts the new acline."
 
-# Same steps as .github/workflows/ci.yml. Packages are `./internal/... .` (not `./...`) so
-# vscode-acline/node_modules is never walked.
-check: ## Run vet, race-detector tests, staticcheck and the extension tests (what CI runs)
+# Same steps as .github/workflows/ci.yml, plus the extension's tests when it is checked out.
+check: ## Run vet, race-detector tests, staticcheck, and the extension tests if EXT_DIR exists
 	go vet ./internal/... .
 	go test -race -count=1 ./internal/... .
 	go run honnef.co/go/tools/cmd/staticcheck@2025.1.1 ./internal/... .
-	$(MAKE) ext-test
+	@if [ -n "$(EXT_FOUND)" ]; then $(MAKE) ext-test; else echo "skipped the extension's tests: no checkout at $(EXT_ABS) (set EXT_DIR)"; fi
 
 vuln: ## Scan Go dependencies for known vulnerabilities (govulncheck)
 	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./internal/... .
@@ -77,7 +84,7 @@ cyclo: ## Report non-test functions with cyclomatic complexity over 30 (advisory
 	-go run github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0 -over 30 -ignore '_test\.go$$' .
 
 # --- CLI ---------------------------------------------------------------
-generate: ## Regenerate the extension's TypeScript types from the MCP server's structs
+generate: ext-found ## Regenerate the extension's TypeScript types (in EXT_DIR) from the MCP server's structs
 	go generate ./internal/mcp
 
 cli: ## Build the CLI into ./bin/acline
@@ -109,17 +116,20 @@ backup-store: ## Back up the acline store to BACKUP_DIR (~/.acline-backups), out
 	fi
 
 # --- Extension ---------------------------------------------------------
-ext-deps: ## Install the extension's npm dependencies if they are missing
-	@if [ ! -d "$(EXT_DIR)/node_modules" ]; then cd $(EXT_DIR) && npm ci; else echo "$(EXT_DIR)/node_modules present"; fi
+ext-found:
+	@test -n "$(EXT_FOUND)" || { echo "the VS Code extension is its own repository; no checkout at $(EXT_ABS)."; echo "clone vscode-acline there, or set EXT_DIR=/path/to/vscode-acline"; exit 1; }
+
+ext-deps: ext-found ## Install the extension's npm dependencies if they are missing
+	@if [ ! -d "$(EXT_ABS)/node_modules" ]; then cd $(EXT_ABS) && npm ci; else echo "$(EXT_ABS)/node_modules present"; fi
 
 ext-build: generate ext-deps ## Compile the extension (regenerates its types first)
-	cd $(EXT_DIR) && npm run compile
+	cd $(EXT_ABS) && npm run compile
 
 ext-test: ext-deps ## Run the extension's unit tests
-	cd $(EXT_DIR) && npm test
+	cd $(EXT_ABS) && npm test
 
-ext-package: ext-build ## Package the extension as a .vsix in vscode-acline/
-	cd $(EXT_DIR) && $(VSCE) package --no-dependencies --allow-missing-repository --out $(notdir $(VSIX))
+ext-package: ext-build ## Package the extension as a .vsix in EXT_DIR
+	cd $(EXT_ABS) && $(VSCE) package --no-dependencies --allow-missing-repository --out $(notdir $(VSIX))
 	@echo "packaged $(VSIX)"
 
 install-ext: ext-package ## Package the extension and install it into VS Code (replaces the installed version)
@@ -131,8 +141,9 @@ install-ext: ext-package ## Package the extension and install it into VS Code (r
 versions: ## Show what is installed, and what a build would produce
 	@echo "installed CLI : $$(command -v acline >/dev/null && acline version || echo none)"
 	@echo "built CLI     : $$(test -x $(BIN_OUT) && $(BIN_OUT) version || echo 'not built')"
-	@echo "extension     : $(EXT_ID) $(EXT_VERSION) (source)"
-	@echo "in VS Code    : $$($(CODE) --list-extensions --show-versions 2>/dev/null | grep -i '$(EXT_NAME)' || echo 'not installed')"
+	@echo "extension     : $(if $(EXT_FOUND),$(EXT_ID) $(EXT_VERSION) (source),no checkout at $(EXT_ABS))"
+	@echo "in VS Code    : $$($(CODE) --list-extensions --show-versions 2>/dev/null | grep -i '$(if $(EXT_NAME),$(EXT_NAME),acline)' || echo 'not installed')"
 
-clean: ## Remove ./bin and the extension's build output and packages
-	rm -rf bin $(EXT_DIR)/out $(EXT_DIR)/*.vsix
+clean: ## Remove ./bin, and the extension's build output and packages if it is checked out
+	rm -rf bin
+	$(if $(EXT_FOUND),rm -rf $(EXT_ABS)/out $(EXT_ABS)/*.vsix)

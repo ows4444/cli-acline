@@ -15,6 +15,7 @@ import (
 
 	"github.com/spf13/cobra"
 
+	"acline/internal/app"
 	"acline/internal/checkrun"
 	"acline/internal/orchestrate"
 	"acline/internal/store"
@@ -174,15 +175,11 @@ func doctorProject(r *doctorReport) {
 	}
 }
 
-// staleSessionAge is how long an active session may go without activity
-// before doctor reports it as probably abandoned.
-const staleSessionAge = 12 * time.Hour
-
 // doctorSessions reports active sessions nothing has happened in for a long
 // time (usually a crashed agent). They are not ended here: ending one lifts its
 // policy and role, which a person decides.
 func doctorSessions(r *doctorReport) {
-	stale, err := r.st.StaleSessions(staleSessionAge)
+	stale, err := r.st.StaleSessions(app.StaleSessionAge)
 	if err != nil {
 		r.warn("sessions", "%v", err)
 		return
@@ -196,7 +193,7 @@ func doctorSessions(r *doctorReport) {
 		lines = append(lines, fmt.Sprintf("#%d started %s by %s", sess.ID, sess.StartedAt, sess.ActorID.String))
 	}
 	r.warn("sessions", "%d active session(s) with no activity for over %s — if abandoned, end them yourself (`acline session end`, from the project's directory):\n      %s",
-		len(stale), staleSessionAge, strings.Join(lines, "\n      "))
+		len(stale), app.StaleSessionAge, strings.Join(lines, "\n      "))
 }
 
 // doctorRunners suggests runner commands for a project whose ecosystem has no

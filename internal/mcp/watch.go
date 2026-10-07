@@ -16,7 +16,7 @@ import (
 // resources/updated for acline://events. It returns when ctx is done.
 // `acline mcp serve` runs it; tests and other embedders need not.
 func WatchStore(ctx context.Context, s *sdkmcp.Server, st *store.Store, interval time.Duration) {
-	last, err := dataVersion(st)
+	last, err := st.DataVersion()
 	if err != nil {
 		return
 	}
@@ -28,17 +28,11 @@ func WatchStore(ctx context.Context, s *sdkmcp.Server, st *store.Store, interval
 			return
 		case <-t.C:
 		}
-		v, err := dataVersion(st)
+		v, err := st.DataVersion()
 		if err != nil || v == last {
 			continue
 		}
 		last = v
 		_ = s.ResourceUpdated(ctx, &sdkmcp.ResourceUpdatedNotificationParams{URI: eventsResourceURI})
 	}
-}
-
-func dataVersion(st *store.Store) (int64, error) {
-	var v int64
-	err := st.DB.QueryRow(`PRAGMA data_version`).Scan(&v)
-	return v, err
 }

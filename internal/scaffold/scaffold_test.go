@@ -544,7 +544,7 @@ func TestShippedSettingsDenyTheObviousDangers(t *testing.T) {
 		t.Fatal(err)
 	}
 	deny, _ := settingsPermissions(t, filepath.Join(root, ".claude", "settings.json"))
-	for _, want := range []string{"Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(./.env)", "Read(**/.env)", "Read(**/.env.*)", "Bash(acline auth *)", "Bash(acline snapshot import*)", "Bash(acline project add*)", "Bash(sqlite3 *)", "Edit(.claude/settings.json)", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git reset --hard*)"} {
+	for _, want := range []string{"Read(~/.ssh/**)", "Read(~/.aws/**)", "Read(./.env)", "Read(**/.env)", "Read(**/.env.*)", "Bash(acline auth *)", "Bash(acline snapshot import*)", "Bash(acline project add*)", "Bash(acline tui*)", "Bash(sqlite3 *)", "Edit(.claude/settings.json)", "Bash(git push --force*)", "Bash(git push -f*)", "Bash(git reset --hard*)"} {
 		if !slices.Contains(deny, want) {
 			t.Errorf("permissions.deny is missing %q: %v", want, deny)
 		}

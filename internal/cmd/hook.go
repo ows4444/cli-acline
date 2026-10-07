@@ -7,8 +7,10 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -424,7 +426,28 @@ func (c *cli) captureMemoryLog(sessionID, transcriptPath, statePath, projectDir 
 		_, _ = c.runSelf(projectDir, "note", "add", line, "--source", "conversation")
 	}
 	st.Offset = end
+	pruneMemoryLogState(state, sessionID)
 	saveMemoryLogState(statePath, state)
+}
+
+// pruneMemoryLogState drops the state of other sessions whose transcript is gone.
+// The file gained an entry per session and lost none, and every turn reads and
+// rewrites it. A transcript Claude Code has deleted cannot be resumed or read
+// again, so its state is no longer needed; one that still exists keeps its state
+// however old, so a resumed session never records a line twice.
+func pruneMemoryLogState(state map[string]*memLogState, current string) {
+	for id, st := range state {
+		if id == current {
+			continue
+		}
+		if st.Path == "" {
+			delete(state, id) // nothing was read, or the old format, whose count does not survive a save
+			continue
+		}
+		if _, err := os.Stat(st.Path); errors.Is(err, fs.ErrNotExist) {
+			delete(state, id)
+		}
+	}
 }
 
 func lineHash(line string) string {

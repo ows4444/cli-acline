@@ -17,6 +17,7 @@
       "Bash(acline auth *)",
       "Bash(acline snapshot import*)",
       "Bash(acline project add*)",
+      "Bash(acline tui*)",
       "Bash(sqlite3 *)",
       "Edit(.claude/settings.json)",
       "Edit(.claude/settings.local.json)",

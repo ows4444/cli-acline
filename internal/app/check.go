@@ -6,6 +6,7 @@ package app
 
 import (
 	"context"
+	"io"
 	"time"
 
 	"acline/internal/checkrun"
@@ -55,6 +56,8 @@ type RunCheckRequest struct {
 	ProjectArg       string
 	AllowCwdFallback bool
 	Hash             func(dir string) string
+	// Output, when set, receives the tool's output as it runs.
+	Output io.Writer
 }
 
 // RunCheck runs the tool in the task's project root (TaskDir: from a subfolder
@@ -88,7 +91,7 @@ func RunCheck(ctx context.Context, st *store.Store, req RunCheckRequest) (int64,
 			return 0, checkrun.Result{}, err
 		}
 	}
-	res, err := checkrun.Run(ctx, req.Kind, dir, command, req.Timeout)
+	res, err := checkrun.RunTo(ctx, req.Kind, dir, command, req.Timeout, req.Output)
 	if err != nil {
 		return 0, checkrun.Result{}, err
 	}

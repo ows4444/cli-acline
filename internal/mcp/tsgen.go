@@ -4,9 +4,27 @@ package mcp
 
 import (
 	"fmt"
+	"os"
+	"path/filepath"
 	"reflect"
 	"strings"
 )
+
+// ExtensionDir is the VS Code extension's checkout, which lives in its own
+// repository: $ACLINE_EXT_DIR, else vscode-acline next to this repository.
+// repoRoot is this repository's root as seen from the caller (go generate and
+// tests run inside internal/<package>, so "../..").
+func ExtensionDir(repoRoot string) string {
+	if dir := os.Getenv("ACLINE_EXT_DIR"); dir != "" {
+		return dir
+	}
+	return filepath.Join(repoRoot, "..", "vscode-acline")
+}
+
+// extensionMissing is the skip message for a test that needs the extension's source.
+func extensionMissing(err error) string {
+	return fmt.Sprintf("VS Code extension not found (%v): clone vscode-acline next to this repository, or set ACLINE_EXT_DIR", err)
+}
 
 // tsInterfaces is the single source of truth mapping a TypeScript interface
 // name (as used throughout vscode-acline/src/*.ts) to the Go struct whose

@@ -64,6 +64,7 @@ The completion gate can no longer be bypassed by an agent without the approval t
 
 ### Added
 
+- **`acline tui`**: a full-screen terminal UI for a person, with seven screens (dashboard, tasks and task detail, review queue, specs, memory, audit, orchestrator) that follow the store live. It refuses to start without a terminal or as an agent, and agents' shells are denied it; with a token enabled it asks for the token in a masked field only when an action needs it. `--project`, `--accessible`, `NO_COLOR`. Adds one dependency, `github.com/ows4444/tui` (itself dependency-free), pinned to a commit and imported only by `internal/tui`.
 - `acline task criteria uncheck <id>` reopens a criterion (MCP's `acline_criteria_check` already took `done=false`). `acline memory review` takes `--project` and `--all-projects`, and inside a project shows that project's pending entries.
 - `acline eval promote` is `acline task promote` under `eval`, next to `eval record` whose result it uses.
 - The shipped agent files, skills and vault text were rewritten and are now held to a rubric by tests: every `acline` command and flag they mention must exist, known-stale claims are banned, and each kind has a word budget. `SOUL.md` + `USER.md` (loaded every session) went from about 960 to about 465 words; `USER.md` is near-empty; `BOOTSTRAP.md` can be skipped; agent descriptions are written as delegation triggers and say exactly how far the read-only limit is enforced; the `reflect` skill no longer promises to set memory text it ignores.

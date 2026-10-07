@@ -414,3 +414,53 @@ func TestCaptureHonoursTheOldCountOnlyState(t *testing.T) {
 		t.Fatalf("sent %v, want only the line the old state had not sent", sent)
 	}
 }
+
+// The state file gained an entry per session and lost none; it is read and
+// rewritten every turn.
+func TestCaptureForgetsSessionsWhoseTranscriptIsGone(t *testing.T) {
+	project := t.TempDir()
+	c := newCLI()
+	fakeSelf(t, c, func([]string) (string, error) { return "", nil })
+	state := filepath.Join(project, "state.json")
+
+	gone := writeTranscript(t, assistantEntry("MEMORY_LOG: old"))
+	kept := writeTranscript(t, assistantEntry("MEMORY_LOG: idle"))
+	c.captureMemoryLog("gone", gone, state, project)
+	c.captureMemoryLog("kept", kept, state, project)
+	c.captureMemoryLog("unknown", "", state, project)
+	os.WriteFile(state, []byte(strings.Replace(mustRead(t, state), "{", `{"legacy":4,`, 1)), 0o644)
+	os.Remove(gone)
+
+	c.captureMemoryLog("now", writeTranscript(t, assistantEntry("MEMORY_LOG: x")), state, project)
+	saved := loadMemoryLogState(state)
+	if _, ok := saved["gone"]; ok {
+		t.Error("a session whose transcript was deleted kept its state")
+	}
+	if _, ok := saved["unknown"]; ok {
+		t.Error("a session with no transcript kept its state")
+	}
+	if _, ok := saved["legacy"]; ok {
+		t.Error("an old-format entry kept its state")
+	}
+	if saved["kept"] == nil || len(saved["kept"].Seen) != 1 {
+		t.Errorf("a session whose transcript still exists lost its state: %+v", saved["kept"])
+	}
+	if saved["now"] == nil {
+		t.Error("the current session's state was not saved")
+	}
+
+	// The current session keeps its state even with no transcript yet.
+	c.captureMemoryLog("unknown", "", state, project)
+	if _, ok := loadMemoryLogState(state)["unknown"]; !ok {
+		t.Error("the current session's state was pruned")
+	}
+}
+
+func mustRead(t *testing.T, path string) string {
+	t.Helper()
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(data)
+}

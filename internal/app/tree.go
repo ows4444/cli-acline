@@ -13,31 +13,47 @@ import (
 )
 
 // ProjectDir is the task's project's registered path when that directory
-// exists, else "" (no project, no path, or the path is gone).
+// exists, else "" (no project, no path, the path is gone, or the store could
+// not be read: TaskDir reports that last case).
 func ProjectDir(st *store.Store, taskID int64) string {
+	dir, _ := projectDir(st, taskID)
+	return dir
+}
+
+func projectDir(st *store.Store, taskID int64) (string, error) {
 	task, err := st.GetTask(taskID)
-	if err != nil || !task.ProjectID.Valid {
-		return ""
+	if err != nil {
+		return "", err
+	}
+	if !task.ProjectID.Valid {
+		return "", nil
 	}
 	projects, err := st.ListProjects()
 	if err != nil {
-		return ""
+		return "", err
 	}
 	for _, p := range projects {
 		if p.ID != task.ProjectID.Int64 || !p.Path.Valid || p.Path.String == "" {
 			continue
 		}
 		if info, err := os.Stat(p.Path.String); err == nil && info.IsDir() {
-			return p.Path.String
+			return p.Path.String, nil
 		}
 	}
-	return ""
+	return "", nil
 }
 
 // TaskDir is the directory a task's checks run in and its gate is about:
-// ProjectDir, or the working directory when the task has none.
+// ProjectDir, or the working directory when the task has none. A task or a
+// project list that cannot be read is an error, never the working directory:
+// that would run the checks of, and fingerprint, whatever directory the caller
+// happens to be in.
 func TaskDir(st *store.Store, taskID int64) (string, error) {
-	if dir := ProjectDir(st, taskID); dir != "" {
+	dir, err := projectDir(st, taskID)
+	if err != nil {
+		return "", err
+	}
+	if dir != "" {
 		return dir, nil
 	}
 	return os.Getwd()
@@ -53,13 +69,13 @@ func TaskTree(st *store.Store, taskID int64, hash func(string) string) string {
 	return hash(dir)
 }
 
-// GateTree is TaskTree for the completion gate: a directory that exists but
-// cannot be fingerprinted is store.TreeUnavailable, not "", so the gate does not
+// GateTree is TaskTree for the completion gate: a directory that cannot be
+// found or fingerprinted is store.TreeUnavailable, not "", so the gate does not
 // mistake "could not check" for "nothing changed".
 func GateTree(st *store.Store, taskID int64, hash func(string) string) string {
 	dir, err := TaskDir(st, taskID)
 	if err != nil {
-		return ""
+		return store.TreeUnavailable
 	}
 	if tree := hash(dir); tree != "" {
 		return tree

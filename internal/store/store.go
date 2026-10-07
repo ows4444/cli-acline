@@ -1007,3 +1007,13 @@ func backupBeforeMigrating(db *sql.DB, path string, from int) error {
 func (s *Store) Close() error {
 	return s.DB.Close()
 }
+
+// DataVersion is SQLite's data_version for this store's connection: it changes
+// whenever another connection (the CLI in a terminal, a hook, an agent, an
+// MCP server) commits, and not for this connection's own writes. A view
+// polls it to know when to reread.
+func (s *Store) DataVersion() (int64, error) {
+	var v int64
+	err := s.DB.QueryRow(`PRAGMA data_version`).Scan(&v)
+	return v, err
+}

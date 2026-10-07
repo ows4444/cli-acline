@@ -4,6 +4,7 @@ import (
 	"bufio"
 	"fmt"
 	"os"
+	"time"
 
 	"github.com/spf13/cobra"
 )
@@ -19,6 +20,15 @@ func newExportCmd(c *cli) *cobra.Command {
 		Use:   "export",
 		Short: "Export the full audit trail as JSONL (one record per line)",
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Dates are compared as text: anything else would silently match
+			// every record or none.
+			if exportSince != "" {
+				if _, err := time.Parse(time.RFC3339, exportSince); err != nil {
+					if _, err := time.Parse(time.DateOnly, exportSince); err != nil {
+						return fmt.Errorf("--since %q is not a date: use 2026-01-01 or 2026-01-01T00:00:00Z", exportSince)
+					}
+				}
+			}
 			out := os.Stdout
 			if exportOut != "" {
 				f, err := createPrivate(exportOut) // the full audit trail

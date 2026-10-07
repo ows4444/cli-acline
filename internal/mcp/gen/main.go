@@ -13,7 +13,12 @@ import (
 )
 
 func main() {
-	out := filepath.Join("..", "..", "vscode-acline", "src", "generated.ts")
+	src := filepath.Join(mcp.ExtensionDir(filepath.Join("..", "..")), "src")
+	if _, err := os.Stat(src); err != nil {
+		fmt.Fprintf(os.Stderr, "gen: VS Code extension not found (%v): clone vscode-acline next to this repository, or set ACLINE_EXT_DIR\n", err)
+		os.Exit(1)
+	}
+	out := filepath.Join(src, "generated.ts")
 	if err := os.WriteFile(out, []byte(mcp.GenerateTypeScript()), 0o644); err != nil {
 		fmt.Fprintln(os.Stderr, "gen:", err)
 		os.Exit(1)

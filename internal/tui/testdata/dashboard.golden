@@ -1,0 +1,40 @@
+acline · all projects · human/ana · token: OFF (identity is self-declared) · no active session
+No approval token: anything that sets ACLINE_ACTOR_TYPE=human can approve. Run `acline auth init`.
+[Dashboard]  Tasks   Review   Specs   Memory   Audit   Orchestrator
+
+Audit trail
+  intact: 12 event(s) and 1 sealed approval/check record(s) verify
+
+Awaiting your approval: the gate needs nothing else (1)
+  #1 [high risk] ship the login fix — human approval required (risk=high, autonomy=hotl) — use: acline approve 1 --kind
+
+Draft specs (1)
+  #1 draft payments spec
+
+Plans awaiting a person (1)
+  plan #2 v2 for spec #2 (by ana)
+
+Proposed decisions (1)
+  #1 use sqlite fts5
+
+Memory awaiting review (1)
+  #1 [pitfall] cobra reads flags before env
+
+Nothing waiting: Tasks needing attention, Stale sessions, Upkeep
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+[↑/↓ pgup/pgdn] scroll  [:] actions  [?] help  [q] quit

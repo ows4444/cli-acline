@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+
+	"acline/internal/mcp"
 )
 
 // Review-finding IDs (a finding number used as a prefix or in parentheses) in code comments point at a review
@@ -18,7 +20,8 @@ var reviewIDRe = regexp.MustCompile(`^\s*(//|\*)\s*[A-Z]-?\d{1,2}: |\((?:see )?[
 
 func TestCommentsCiteNoReviewIDs(t *testing.T) {
 	var bad []string
-	for _, root := range []string{"../../internal", "../../vscode-acline/src"} {
+	// The extension lives in its own repository; its source is checked when it is checked out.
+	for _, root := range []string{"../../internal", filepath.Join(mcp.ExtensionDir("../.."), "src")} {
 		err := filepath.WalkDir(root, func(path string, d fs.DirEntry, err error) error {
 			if err != nil {
 				return err

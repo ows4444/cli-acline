@@ -1,0 +1,40 @@
+acline · all projects · human/ana · token: OFF (identity is self-declared) · no active session
+No approval token: anything that sets ACLINE_ACTOR_TYPE=human can approve. Run `acline auth init`.
+[Tasks]
+
+#1 ship the login fix                          │ Gate: 2 blocker(s)
+status    todo                                 │   ✗ (agent) the code has changed since the passing checks ran
+priority  high                                 │       (risk=high) — re-run: acline check run 1 --kind test
+risk      high                                 │   ✗ (person) human approval required (risk=high, autonomy=hotl) —
+autonomy  hotl                                 │       use: acline approve 1 --kind code_review
+area      cli                                  │   ! test check passed for a different version of the code than the
+by        human/ana                            │       current one — the code changed since; re-run: acline check run 1
+created   2026-01-01T00:00:00Z                 │       --kind test
+                                               │   ! 1 acceptance criterion/criteria still unchecked
+Users bounce to / after login.                 │
+                                               │ Newest check per kind
+Acceptance criteria (1)                        │   test pass runner 2026-01-01T00:00:00Z by human/ana STALE: about
+  [ ] #1 When a user logs in, the system       │       older code
+      shall return them to the page they came  │
+      from                                     │ Approvals (0)
+                                               │   none
+                                               │
+                                               │ History, newest first
+                                               │   2026-01-01T00:00:00Z criterion_added criterion #1 added: When a
+                                               │       user logs in, the system shall return them to the page they came
+                                               │       from
+                                               │   2026-01-01T00:00:00Z check test: pass (runner)
+                                               │   2026-01-01T00:00:00Z task_created task #1 created: ship the login
+                                               │       fix (risk high, autonomy hotl)
+
+
+
+
+
+
+
+
+
+
+
+[esc] back  [←/→] column  [↑/↓] scroll  [a] approve  [X] reject  [d] done  [D] force done  [c] criterion  [o] role  [z]

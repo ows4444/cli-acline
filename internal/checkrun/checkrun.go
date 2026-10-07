@@ -13,6 +13,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -50,6 +51,13 @@ type Result struct {
 // Run executes the runner for kind in dir. A non-empty command overrides the
 // default; it is split into words by SplitCommand and executed without a shell.
 func Run(ctx context.Context, kind, dir, command string, timeout time.Duration) (Result, error) {
+	return RunTo(ctx, kind, dir, command, timeout, nil)
+}
+
+// RunTo is Run that also copies the tool's output to live as it is written
+// (nil: nowhere), so a person can watch a long run. The recorded detail is the
+// same either way.
+func RunTo(ctx context.Context, kind, dir, command string, timeout time.Duration, live io.Writer) (Result, error) {
 	known := false
 	for _, k := range Kinds {
 		known = known || k == kind
@@ -84,6 +92,10 @@ func Run(ctx context.Context, kind, dir, command string, timeout time.Duration) 
 	cmd.Dir = dir
 	out := &tailBuffer{max: maxBuffered}
 	cmd.Stdout, cmd.Stderr = out, out
+	if live != nil {
+		w := io.MultiWriter(out, live)
+		cmd.Stdout, cmd.Stderr = w, w
+	}
 	proc.Bound(cmd) // kill what the tool spawned, and stop waiting for its pipes
 	runErr := cmd.Run()
 

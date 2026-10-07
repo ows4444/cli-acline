@@ -301,7 +301,7 @@ func loadOwnSnapshot(f *auditFixture, withToken bool) error {
 }
 
 // readOnly and exempt methods change nothing that needs an audit event.
-var readOnlyStoreMethods = strings.Fields(`ApprovalTokenEnabled AuthorizeAdHocCheckCommand ChainHead CheckAnchor
+var readOnlyStoreMethods = strings.Fields(`ApprovalTokenEnabled AuthorizeAdHocCheckCommand ChainHead CheckAnchor DataVersion EventTypes
 	CheckApprovalToken CheckHeadSeal CheckRunnerCommand ComputeMetrics ComputeMetricsFor CountDecayCandidates
 	CountDecayCandidatesIn CountDraftedMemory CountDraftedMemoryIn CountEventsAfter CountPendingMemory
 	CountPendingMemoryIn CountSessionEventsAfter CurrentSession DecayCandidates DraftPlans EmbeddingsEnabled

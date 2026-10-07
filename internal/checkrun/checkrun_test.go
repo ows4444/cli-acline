@@ -120,3 +120,17 @@ func TestSuggestRunnersDetectsTheEcosystemButNotGo(t *testing.T) {
 		t.Fatalf("a Go module has defaults; got %q, %v", eco, s)
 	}
 }
+
+func TestRunToCopiesOutputAsItIsWritten(t *testing.T) {
+	var live strings.Builder
+	r, err := RunTo(context.Background(), "lint", t.TempDir(), "echo found 3 issues", 0, &live)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if live.String() != "found 3 issues\n" {
+		t.Errorf("live output = %q", live.String())
+	}
+	if r.Status != "pass" || !strings.Contains(r.Detail, "found 3 issues") {
+		t.Errorf("the recorded result changed with a live writer: %+v", r)
+	}
+}

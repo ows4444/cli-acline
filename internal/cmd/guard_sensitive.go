@@ -53,7 +53,13 @@ var (
 	// Every registered project path is inside the guard's write scope, so
 	// registering one decides where agents may write. The store refuses an agent
 	// without the token; denying it here stops the attempt before it starts.
-	projectAddRe    = regexp.MustCompile(`(?i)\bacline\b[^;&|\n]*\bproject\s+add\b`)
+	projectAddRe = regexp.MustCompile(`(?i)\bacline\b[^;&|\n]*\bproject\s+add\b`)
+	// The TUI is a person's interface, with approve and the other person-only
+	// actions a keypress away; an agent driving it through a pseudo-terminal
+	// would be acting as the person at the keyboard.
+	// tui must be the subcommand (after any global flags such as --db x), so
+	// `acline task list --area tui` stays allowed.
+	tuiRe           = regexp.MustCompile(`(?i)\bacline(?:\s+-{1,2}[\w-]+(?:=\S+|\s+[^-\s]\S*)?)*\s+tui\b`)
 	approvalEnvRe   = regexp.MustCompile(`(?i)(?:^|[\s;&|($="'])ACLINE_APPROVAL_TOKEN`)
 	identityUnsetRe = regexp.MustCompile(`(?i)(?:^|[\s;&|(])(?:unset\s+(?:-\w+\s+)*(?:\S+\s+)*|env\s+(?:\S+\s+)*-u\s*)ACLINE_(?:ACTOR_TYPE|ACTOR|MODEL)\b|(?:^|[\s;&|(])env\s+(?:-\S*i\S*|--ignore-environment)\b`)
 )
@@ -77,6 +83,9 @@ func bashSensitiveAccess(c, dbPath string) string {
 	}
 	if projectAddRe.MatchString(c) {
 		return "blocked: registering a project path widens where agents may write; a human runs `acline project add` in their own terminal"
+	}
+	if tuiRe.MatchString(c) {
+		return "blocked: `acline tui` is a person's interface; a human runs it in their own terminal"
 	}
 	if approvalEnvRe.MatchString(c) {
 		return "blocked: the approval token is a human-held secret; agent commands must not read or set ACLINE_APPROVAL_TOKEN"

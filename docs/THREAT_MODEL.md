@@ -26,7 +26,7 @@ The claim acline makes: **an agent cannot make work look verified, reviewed or a
 
 - **The store is the source of truth; adapters are not.** Every rule lives in `internal/store`, so the CLI, the MCP server and the orchestrator all get it.
 - **A person is a human actor at a terminal.** Until `acline auth init`, "human" is whatever `ACLINE_ACTOR_TYPE` says; an agent that sets it is treated as a person. The guard blocks that in an agent's *shell* commands, but the environment variable itself is not protected from anything that starts `acline` directly. **Enable the token.** With it on, the privileged actions in [ARCHITECTURE.md](ARCHITECTURE.md#authority-who-may-do-what) need a secret the agent never holds.
-- **The token** is 256 bits, stored only as a SHA-256 hash in the database (excluded from snapshots), entered on `/dev/tty`, never read from the MCP server's environment, and stripped from the orchestrator's.
+- **The token** is 256 bits, stored only as a SHA-256 hash in the database (excluded from snapshots), entered on `/dev/tty` (or, in `acline tui`, in a masked field on its own screen), never read from the MCP server's environment, and stripped from the orchestrator's.
 - **Claude Code's permission model is a separate layer.** The guard hook and the orchestrator's allow/deny lists add to it; they do not replace it.
 
 ## What is enforced
@@ -63,6 +63,9 @@ The claim acline makes: **an agent cannot make work look verified, reviewed or a
 | Orchestrated test code reads `~/.ssh`/`~/.aws` or phones home | Bash sandbox: credential paths unreadable, writes and network allow-listed, fails closed (`--no-sandbox` to opt out) | `orchestrate/sandbox_test.go` |
 | Orchestrator launched where no guard runs | preflight refuses | `orchestrate/env_guard_test.go` |
 | Recorded text read as instructions | fenced as data with a rule in every prompt | `untrusted/`, `brief/`, `orchestrate/` tests |
+| Agent drives the terminal UI, where every approval is one key away | `acline tui` needs a terminal on stdin and stdout and refuses an agent actor; the guard and the settings deny list refuse it in an agent's shell; the store refuses an agent each privileged action regardless | `cmd/tui_test.go`, `cmd/guard_sensitive_test.go`, `scaffold/scaffold_test.go`, `tui/safety_test.go` |
+| The approval token is shown or left on the person's screen | the TUI asks for it in a masked field only when the store requires it, draws it on no frame, and a wrong one writes only the refusal's event | `tui/safety_test.go`, `tui/actions_test.go` |
+| Text an agent recorded carries terminal escape sequences (retitle the window, write the clipboard, redraw over what is being approved) | the TUI passes stored text through a sanitiser before drawing it; tested for spec titles on the dashboard and the project name in the header, not for every field | `tui/dashboard_test.go` |
 | A migration corrupts the shared store | pre-migration backup; newer store refused | `store/migration_backup_test.go` |
 
 ## Known limits (open items)

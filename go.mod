@@ -4,6 +4,7 @@ go 1.25.5
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
+	github.com/ows4444/tui v0.0.0-20261004165550-d7cb82e5686f
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.57.0
 )

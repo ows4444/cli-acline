@@ -1,6 +1,6 @@
 # Architecture
 
-acline is one Go binary (`main.go` → `internal/cmd`) over one SQLite database. Everything else — the CLI, the MCP server, the Claude Code hooks, the orchestrator — is a thin adapter around the same store, so a rule enforced in the store holds for every entry point.
+acline is one Go binary (`main.go` → `internal/cmd`) over one SQLite database. Everything else — the CLI, the terminal UI, the MCP server, the Claude Code hooks, the orchestrator — is a thin adapter around the same store, so a rule enforced in the store holds for every entry point.
 
 ```
                   ┌──────────── Claude Code ────────────┐
@@ -25,8 +25,9 @@ acline is one Go binary (`main.go` → `internal/cmd`) over one SQLite database.
 | Package | Role |
 |---|---|
 | `internal/store` | The whole data model and **every rule**: schema and migrations, the completion gate, approvals and seals, the audit chain, authority checks, search, snapshots. Depends on nothing above it. |
-| `internal/app` | Use-cases both adapters share (project/role resolution, approve/reject, the dashboard view). |
+| `internal/app` | Use-cases the adapters share (project/role resolution, approve/reject, the dashboard view). |
 | `internal/cmd` | The cobra CLI, the guard (`guard*.go`), the hooks (`hook.go`), `doctor`. Each command is built by a constructor around one `cli` (the store, plus what a test replaces); no package-level state. |
+| `internal/tui` | The terminal UI (`acline tui`): a third adapter, for a person. The only package that imports `github.com/ows4444/tui` (pinned to a commit; a test enforces the boundary). |
 | `internal/mcp` | The MCP server: tools, a resource, and middleware (session policy, stable `error_code`s, client-version warning). Also generates the VS Code extension's TypeScript types. |
 | `internal/orchestrate` | Runs one bounded agent step (`step`, `run`, `plan`, `spec`, `research`) and re-reads recorded state to decide what happens next. |
 | `internal/brief`, `internal/untrusted` | Assemble an agent's prompt; fence recorded text as data. |
@@ -116,6 +117,18 @@ Warnings (never blockers, below high risk): an agent's hand-typed pass of a runn
 - it refuses to launch where that project's guard hook is missing or does not cover every tool the guard checks;
 - it launches only steps an agent may take, on tasks that are not `hitl` and not high/critical risk; it never completes a task; a `hotl` task gets one step and then a review point;
 - `plan`, `spec` and `research` are read-only and end by submitting exactly one draft (a plan, a spec, or a decision/note) that a person then decides on.
+
+## Terminal UI
+
+`acline tui` (`internal/tui`) is a third adapter beside the CLI and the MCP server: seven screens (dashboard, tasks with a task's detail, review queue, specs, memory, audit, orchestrator) over the same store. It calls `internal/app` where a use case exists and the store's own methods otherwise, so it can add no rule and skip none. Once a second it reads SQLite's `data_version`; when another process has committed it rereads the header and the screen showing, and the other screens when they are next shown. A screen with a prompt open is reread only after the person answers, so the rows do not move under the question. Its rules:
+
+- **It is a person's interface.** `acline tui` refuses to start unless stdin and stdout are a terminal, `tui.Run` refuses an agent actor, the guard denies `acline tui` in an agent's Bash, and `acline init` puts `Bash(acline tui*)` in the settings deny list. Behind all of that the store still refuses an agent every privileged action.
+- **The token is asked for, never taken.** An action runs without a token first; only when the store answers that it needs one does the TUI ask, in a masked field on its own screen. It is never read from the environment, never drawn, and dropped with the field once the action has run. A wrong token writes nothing but the `approval_token` event that records the refusal.
+- **Nothing is hidden to look cleaner.** The task detail shows the gate's blockers and warnings as the CLI prints them, each marked with who can clear it (agent or person).
+- **Stored text is untrusted.** Titles, bodies and messages are often written by agents; each screen strips escape sequences from it before drawing, so recorded text cannot retitle the window, write the clipboard or redraw the screen over what is being approved.
+- **The orchestrator runs as a child process** (`acline orchestrate step|run`), so the TUI's own actor stays the person; quitting the TUI ends a run still going.
+
+`internal/tui/safety_test.go` runs every token-guarded action on every screen against these rules.
 
 ## Prompts
 

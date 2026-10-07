@@ -26,6 +26,7 @@ type cli struct {
 	// What a test replaces on its own cli; newCLI sets the real ones.
 	hashTree        func(dir string) string // fingerprints a directory
 	openTerminal    func() (terminal, error)
+	stdioTerminal   func() bool                                      // stdin and stdout are a terminal, for the TUI
 	runSelf         func(dir string, args ...string) (string, error) // this binary, for the hooks
 	guard           func(s *store.Store, vaultRoot string, in io.Reader, out io.Writer) error
 	hookTimeout     time.Duration // how long the guard may take before the call is denied
@@ -38,6 +39,7 @@ func newCLI() *cli {
 	c := &cli{
 		hashTree:        worktree.Hash,
 		openTerminal:    openTTY,
+		stdioTerminal:   stdioIsTerminal,
 		runSelf:         runSelfExec,
 		guard:           guardCheckTool,
 		hookTimeout:     10 * time.Second,
@@ -104,7 +106,7 @@ func newRootCmd(c *cli) *cobra.Command {
 		newSnapshotCmd(c), newPolicyCmd(c), newNextCmd(c), newMcpCmd(c), newEvalCmd(c), newMemoryCmd(c),
 		newReflectCmd(c), newPlanCmd(c), newTaskCmd(c), newApproveCmd(c), newRejectCmd(c), newCheckCmd(c),
 		newContextCmd(c), newVerifyCmd(c), newSessionCmd(c), newDoctorCmd(c), newVersionCmd(c), newPluginCmd(c),
-		newInitCmd(c), newOrchestrateCmd(c), newGuardCmd(c), newHookCmd(c),
+		newInitCmd(c), newOrchestrateCmd(c), newGuardCmd(c), newHookCmd(c), newTUICmd(c),
 	)
 	return root
 }

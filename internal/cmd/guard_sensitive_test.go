@@ -40,6 +40,11 @@ func TestBashSensitiveAccess(t *testing.T) {
 		// a registered project path widens the guard's write scope
 		"acline project add everything /",
 		"cd /tmp && acline --db x.db project add home ~",
+		// the TUI is a person's interface
+		"acline tui",
+		"script -q /dev/null acline --db x.db tui --project p",
+		"acline --db=x.db tui",
+		"/usr/local/bin/acline tui --accessible",
 	}
 	for _, cmd := range blocked {
 		blockedNow, why := checkBashCommandWithDB(cmd, db)
@@ -68,6 +73,9 @@ func TestBashSensitiveAccess(t *testing.T) {
 		`git commit -m "document ACLINE_APPROVAL_TOKEN and acline auth init"`,
 		"acline project list",
 		`acline note add "ask the user to run acline project add for the api repo"`,
+		`acline note add "try acline tui for reviews"`,
+		"acline task list --area tui",
+		`acline task add "build the tui" --area cli`,
 	}
 	for _, cmd := range allowed {
 		if blockedNow, why := checkBashCommandWithDB(cmd, db); blockedNow {

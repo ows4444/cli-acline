@@ -380,6 +380,7 @@ type EventFilter struct {
 	// carry no project of their own).
 	ProjectID *int64
 	ActorType string
+	Type      string // one event type, e.g. "approval"
 	Since     string
 	Limit     int
 }
@@ -403,6 +404,10 @@ func (s *Store) QueryEvents(f EventFilter) ([]Event, error) {
 	if f.ActorType != "" {
 		where = append(where, `actor_type = ?`)
 		args = append(args, f.ActorType)
+	}
+	if f.Type != "" {
+		where = append(where, `type = ?`)
+		args = append(args, f.Type)
 	}
 	if f.Since != "" {
 		where = append(where, `created_at >= ?`)
@@ -477,4 +482,22 @@ func stringArgs(ss []string) []any {
 		out[i] = s
 	}
 	return out
+}
+
+// EventTypes lists the event types the audit trail holds, for filtering.
+func (s *Store) EventTypes() ([]string, error) {
+	rows, err := s.DB.Query(`SELECT DISTINCT type FROM events ORDER BY type`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []string
+	for rows.Next() {
+		var t string
+		if err := rows.Scan(&t); err != nil {
+			return nil, err
+		}
+		out = append(out, t)
+	}
+	return out, rows.Err()
 }
