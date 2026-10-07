@@ -65,18 +65,7 @@ func TestIsInteractiveUnderTestRunner(t *testing.T) {
 }
 
 func TestGatherInitAnswersUsesFlagsWhenSet(t *testing.T) {
-	prevName, prevRisk, prevHITL, prevAreas, prevYes := initName, initRisk, initHITL, initAreas, initYes
-	t.Cleanup(func() {
-		initName, initRisk, initHITL, initAreas, initYes = prevName, prevRisk, prevHITL, prevAreas, prevYes
-	})
-
-	initName = "widget-tool"
-	initRisk = "high"
-	initHITL = true
-	initAreas = "backend, frontend"
-	initYes = true
-
-	a := gatherInitAnswers(true)
+	a := gatherInitAnswers(&initFlags{name: "widget-tool", risk: "high", hitl: true, areas: "backend, frontend", yes: true}, true)
 	if a.ProjectName != "widget-tool" || a.DefaultRisk != "high" || !a.DefaultHITL {
 		t.Errorf("expected flags to pass through unchanged, got %+v", a)
 	}
@@ -86,17 +75,10 @@ func TestGatherInitAnswersUsesFlagsWhenSet(t *testing.T) {
 }
 
 func TestGatherInitAnswersFallsBackNonInteractively(t *testing.T) {
-	prevName, prevRisk, prevHITL, prevAreas, prevYes := initName, initRisk, initHITL, initAreas, initYes
-	t.Cleanup(func() {
-		initName, initRisk, initHITL, initAreas, initYes = prevName, prevRisk, prevHITL, prevAreas, prevYes
-	})
-
-	initName, initRisk, initHITL, initAreas = "", "", false, ""
-	initYes = true
 	dir := t.TempDir()
 	t.Chdir(dir)
 
-	a := gatherInitAnswers(true)
+	a := gatherInitAnswers(&initFlags{yes: true}, true)
 	if a.DefaultRisk != "low" {
 		t.Errorf("expected default risk to fall back to low, got %q", a.DefaultRisk)
 	}
@@ -111,12 +93,8 @@ func TestWriteClaudeMDSkipsExistingFileWithoutForce(t *testing.T) {
 	if err := os.WriteFile("CLAUDE.md", []byte("hand-written\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	prevForce := initForceClaude
-	initForceClaude = false
-	t.Cleanup(func() { initForceClaude = prevForce })
-
 	out := captureStdout(t, func() {
-		if _, err := writeClaudeMD(false); err != nil {
+		if _, err := writeClaudeMD(&initFlags{}, false); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -135,11 +113,7 @@ func TestWriteClaudeMDSkipsExistingFileWithoutForce(t *testing.T) {
 func TestWriteClaudeMDWritesWhenMissing(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	prevName, prevRisk, prevYes, prevForce := initName, initRisk, initYes, initForceClaude
-	initName, initRisk, initYes, initForceClaude = "widget-tool", "low", true, false
-	t.Cleanup(func() { initName, initRisk, initYes, initForceClaude = prevName, prevRisk, prevYes, prevForce })
-
-	if _, err := writeClaudeMD(false); err != nil {
+	if _, err := writeClaudeMD(&initFlags{name: "widget-tool", risk: "low", yes: true}, false); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile("CLAUDE.md")
@@ -154,12 +128,9 @@ func TestWriteClaudeMDWritesWhenMissing(t *testing.T) {
 func TestLoadSnapshotSeedNoopWhenFileMissing(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	s := withTestStore(t)
-	prevFromJSON := initFromJSON
-	initFromJSON = "does-not-exist.json"
-	t.Cleanup(func() { initFromJSON = prevFromJSON })
-
-	if err := loadSnapshotSeed(s); err != nil {
+	c := newTestCLI(t)
+	s := c.st
+	if err := loadSnapshotSeed(s, "does-not-exist.json"); err != nil {
 		t.Fatalf("expected a missing snapshot file to be a no-op, got: %v", err)
 	}
 }
@@ -167,7 +138,8 @@ func TestLoadSnapshotSeedNoopWhenFileMissing(t *testing.T) {
 func TestLoadSnapshotSeedLoadsPresentFile(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	src := withTestStore(t)
+	c := newTestCLI(t)
+	src := c.st
 	if _, err := src.AddTask("seed task", "", "normal", store.TaskOpts{}); err != nil {
 		t.Fatal(err)
 	}
@@ -180,13 +152,10 @@ func TestLoadSnapshotSeedLoadsPresentFile(t *testing.T) {
 	}
 	f.Close()
 
-	dst := withTestStore(t)
-	prevFromJSON := initFromJSON
-	initFromJSON = "seed.json"
-	t.Cleanup(func() { initFromJSON = prevFromJSON })
+	dst := newTestCLI(t).st
 
 	out := captureStdout(t, func() {
-		if err := loadSnapshotSeed(dst); err != nil {
+		if err := loadSnapshotSeed(dst, "seed.json"); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -205,10 +174,11 @@ func TestLoadSnapshotSeedLoadsPresentFile(t *testing.T) {
 func TestRegisterCurrentProjectRegistersAndMarksCwd(t *testing.T) {
 	dir := t.TempDir()
 	t.Chdir(dir)
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	cwd, _ := os.Getwd()
 
-	if err := registerCurrentProject(s, "widget-tool", true); err != nil {
+	if err := c.registerCurrentProject(s, "widget-tool", true, ""); err != nil {
 		t.Fatal(err)
 	}
 	p, err := s.GetProjectByName("widget-tool")
@@ -226,7 +196,7 @@ func TestRegisterCurrentProjectRegistersAndMarksCwd(t *testing.T) {
 	// Re-running init in the same directory must not register it twice,
 	// even under a different name.
 	out := captureStdout(t, func() {
-		if err := registerCurrentProject(s, "renamed", false); err != nil {
+		if err := c.registerCurrentProject(s, "renamed", false, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -240,14 +210,15 @@ func TestRegisterCurrentProjectRegistersAndMarksCwd(t *testing.T) {
 }
 
 func TestRegisterCurrentProjectLeavesNameConflictAlone(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	if _, err := s.AddProject("widget-tool", t.TempDir(), "hotl"); err != nil {
 		t.Fatal(err)
 	}
 	t.Chdir(t.TempDir())
 
 	out := captureStdout(t, func() {
-		if err := registerCurrentProject(s, "widget-tool", false); err != nil {
+		if err := c.registerCurrentProject(s, "widget-tool", false, ""); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -268,9 +239,10 @@ func TestInitOffersTheApprovalToken(t *testing.T) {
 	never := func(string) bool { t.Fatal("asked in a non-interactive run"); return false }
 
 	t.Run("a script is told how, and nothing is enabled", func(t *testing.T) {
-		s := withTestStore(t)
+		c := newTestCLI(t)
+		s := c.st
 		out := string(captureStdout(t, func() {
-			if err := offerApprovalToken(s, false, never); err != nil {
+			if err := c.offerApprovalToken(s, false, never); err != nil {
 				t.Fatal(err)
 			}
 		}))
@@ -283,9 +255,10 @@ func TestInitOffersTheApprovalToken(t *testing.T) {
 	})
 
 	t.Run("declining leaves it off and init succeeds", func(t *testing.T) {
-		s := withTestStore(t)
+		c := newTestCLI(t)
+		s := c.st
 		captureStdout(t, func() {
-			if err := offerApprovalToken(s, true, no); err != nil {
+			if err := c.offerApprovalToken(s, true, no); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -295,10 +268,11 @@ func TestInitOffersTheApprovalToken(t *testing.T) {
 	})
 
 	t.Run("accepting enables it after the terminal confirmation", func(t *testing.T) {
-		s := withTestStore(t)
-		tty := withFakeTerminal(t, "ENABLE\n")
+		c := newTestCLI(t)
+		s := c.st
+		tty := withFakeTerminal(c, "ENABLE\n")
 		captureStdout(t, func() {
-			if err := offerApprovalToken(s, true, yes); err != nil {
+			if err := c.offerApprovalToken(s, true, yes); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -311,10 +285,11 @@ func TestInitOffersTheApprovalToken(t *testing.T) {
 	})
 
 	t.Run("no terminal: init still succeeds, token stays off", func(t *testing.T) {
-		s := withTestStore(t)
-		withNoTerminal(t)
+		c := newTestCLI(t)
+		s := c.st
+		withNoTerminal(c)
 		captureStdout(t, func() {
-			if err := offerApprovalToken(s, true, yes); err != nil {
+			if err := c.offerApprovalToken(s, true, yes); err != nil {
 				t.Fatalf("init must not fail over the offer: %v", err)
 			}
 		})
@@ -324,12 +299,13 @@ func TestInitOffersTheApprovalToken(t *testing.T) {
 	})
 
 	t.Run("already enabled: silent", func(t *testing.T) {
-		s := withTestStore(t)
+		c := newTestCLI(t)
+		s := c.st
 		if _, err := s.EnableApprovalToken(); err != nil {
 			t.Fatal(err)
 		}
 		out := captureStdout(t, func() {
-			if err := offerApprovalToken(s, true, never); err != nil {
+			if err := c.offerApprovalToken(s, true, never); err != nil {
 				t.Fatal(err)
 			}
 		})

@@ -31,7 +31,7 @@ type Route struct {
 	SpecID     *int64
 
 	WaitingOn     []string // unfinished prerequisites, as "#id title [status]"
-	Blockers      []string // unmet gate blockers (approval only, once checks are settled)
+	Blockers      []string // unmet gate blockers, once checks are settled: an agent's first, else a person's
 	OpenCriteria  []string
 	FailingChecks []string // "<kind>: <detail>" for each latest failing check
 	Lessons       []MemoryEntry
@@ -47,28 +47,21 @@ func (s *Store) RouteTask(taskID int64) (*Route, error) {
 	if t.SpecID.Valid {
 		r.SpecID = &t.SpecID.Int64
 	}
-	var projectID *int64
-	if t.ProjectID.Valid {
-		projectID = &t.ProjectID.Int64
-	}
-	role := func(name string) {
-		if ro, err := s.GetRoleByName(projectID, name); err == nil {
-			r.Role = ro
-		}
-	}
-	finish := func(action, reason, roleName string, human bool) (*Route, error) {
-		r.Action, r.Reason, r.NeedsHuman = action, reason, human
-		if roleName != "" {
-			role(roleName)
+	finish := func(st routeStep) (*Route, error) {
+		r.Action, r.Reason, r.NeedsHuman = st.action, st.reason, st.human
+		if st.role != "" {
+			if ro, err := s.GetRoleByName(nullIntPtr(t.ProjectID), st.role); err == nil {
+				r.Role = ro
+			}
 		}
 		return r, nil
 	}
 
 	if t.Status == "done" || t.Status == "cancelled" {
-		return finish(RouteNone, "task is "+t.Status, "", false)
+		return finish(routeStep{RouteNone, "task is " + t.Status, "", false})
 	}
 	if t.Deferred {
-		return finish(RouteNone, "task is deferred", "", false)
+		return finish(routeStep{RouteNone, "task is deferred", "", false})
 	}
 
 	criteria, err := s.ListCriteria(taskID)
@@ -84,20 +77,60 @@ func (s *Store) RouteTask(taskID int64) (*Route, error) {
 		r.Lessons = lessons
 	}
 
+	if st, err := s.routeOnState(t, r); err != nil || st != nil {
+		if err != nil {
+			return nil, err
+		}
+		return finish(*st)
+	}
+	checks, err := s.ListChecks(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if st := routeOnChecks(t, len(criteria), checks, r); st != nil {
+		return finish(*st)
+	}
+
+	gate, err := s.EvaluateGate(taskID)
+	if err != nil {
+		return nil, err
+	}
+	if !gate.OK() {
+		// Evidence an agent can produce comes before asking a person: an
+		// approval is of the code as verified, so it waits for the checks.
+		if agent := gate.AgentBlockers(); len(agent) > 0 {
+			r.Blockers = agent
+			return finish(routeStep{RouteVerify, fmt.Sprintf("the gate needs %d more check result(s) acline ran", len(agent)), "qa", false})
+		}
+		r.Blockers = gate.PersonBlockers
+		return finish(routeStep{RouteRequestApproval, "checks are settled; the gate still needs a human decision", "manager", true})
+	}
+	return finish(routeStep{RouteComplete, "gate satisfied", "", false})
+}
+
+// routeStep is a route decision: the action, why, the role it goes to and
+// whether a person must take it.
+type routeStep struct {
+	action, reason, role string
+	human                bool
+}
+
+// routeOnState routes a task its own state holds up: blocked, its spec still a
+// draft, or prerequisites not done (listed on r). nil means none applies.
+func (s *Store) routeOnState(t *Task, r *Route) (*routeStep, error) {
 	if t.Status == "blocked" {
 		why := "blocked with no recorded reason (record one: acline task update " + fmt.Sprint(t.ID) + " --status blocked --reason \"...\")"
 		if t.BlockedReason.Valid {
 			why = "blocked: " + t.BlockedReason.String
 		}
-		return finish(RouteResolveBlocker, why, "scrummaster", true)
+		return &routeStep{RouteResolveBlocker, why, "scrummaster", true}, nil
 	}
 	if t.SpecID.Valid {
 		if sp, err := s.GetSpec(t.SpecID.Int64); err == nil && sp.Status == "draft" {
-			return finish(RouteApproveSpec, fmt.Sprintf("spec #%d is still a draft", sp.ID), "manager", true)
+			return &routeStep{RouteApproveSpec, fmt.Sprintf("spec #%d is still a draft", sp.ID), "manager", true}, nil
 		}
 	}
-
-	open, err := s.OpenPrerequisites(taskID)
+	open, err := s.OpenPrerequisites(t.ID)
 	if err != nil {
 		return nil, err
 	}
@@ -105,13 +138,15 @@ func (s *Store) RouteTask(taskID int64) (*Route, error) {
 		for _, p := range open {
 			r.WaitingOn = append(r.WaitingOn, prerequisiteLabel(p))
 		}
-		return finish(RouteWaitDependency, fmt.Sprintf("waiting on %d prerequisite task(s)", len(open)), "", false)
+		return &routeStep{RouteWaitDependency, fmt.Sprintf("waiting on %d prerequisite task(s)", len(open)), "", false}, nil
 	}
+	return nil, nil
+}
 
-	checks, err := s.ListChecks(taskID)
-	if err != nil {
-		return nil, err
-	}
+// routeOnChecks routes a task its checks decide: failing (listed on r), a
+// skipped scan at high risk, everything skipped, or nothing recorded yet. nil
+// means the checks are settled and the gate decides.
+func routeOnChecks(t *Task, criteria int, checks []Check, r *Route) *routeStep {
 	latest := make(map[string]Check)
 	for _, c := range checks {
 		latest[c.Kind] = c // append-only: the newest result per kind is current
@@ -122,37 +157,29 @@ func (s *Store) RouteTask(taskID int64) (*Route, error) {
 		}
 	}
 	if len(r.FailingChecks) > 0 {
-		return finish(RouteFixChecks, fmt.Sprintf("%d check(s) failing", len(r.FailingChecks)), "developer", false)
+		return &routeStep{RouteFixChecks, fmt.Sprintf("%d check(s) failing", len(r.FailingChecks)), "developer", false}
 	}
-
 	if t.Risk == "high" || t.Risk == "critical" {
 		for _, kind := range []string{"sast", "sca"} {
 			if c, ok := latest[kind]; ok && c.Status == "skipped" {
-				return finish(RouteVerify, kind+" scan was skipped; install the tool and run: acline check run", "security", false)
+				return &routeStep{RouteVerify, kind + " scan was skipped; install the tool and run: acline check run", "security", false}
 			}
 		}
 	}
-
+	if len(latest) > 0 && everyResultSkipped(latest) {
+		return &routeStep{RouteVerify, "every recorded check was skipped: run one acline can run", "qa", false}
+	}
 	if len(checks) == 0 {
 		switch t.Status {
 		case "backlog", "todo":
-			if len(criteria) == 0 {
-				return finish(RouteDefineCriteria, "no acceptance criteria yet", "architect", false)
+			if criteria == 0 {
+				return &routeStep{RouteDefineCriteria, "no acceptance criteria yet", "architect", false}
 			}
-			return finish(RouteStartWork, "not started", "developer", false)
+			return &routeStep{RouteStartWork, "not started", "developer", false}
 		}
-		return finish(RouteVerify, "work is underway but no verification is recorded", "qa", false)
+		return &routeStep{RouteVerify, "work is underway but no verification is recorded", "qa", false}
 	}
-
-	gate, err := s.EvaluateGate(taskID)
-	if err != nil {
-		return nil, err
-	}
-	if !gate.OK() {
-		r.Blockers = gate.Blockers
-		return finish(RouteRequestApproval, "checks are settled; the gate still needs a human decision", "manager", true)
-	}
-	return finish(RouteComplete, "gate satisfied", "", false)
+	return nil
 }
 
 // NextTask picks the task to work on next: the highest-priority open task
@@ -180,4 +207,14 @@ func (s *Store) NextTask(projectID *int64) (*Route, error) {
 		}
 	}
 	return waiting, nil
+}
+
+// everyResultSkipped reports whether every newest result per kind is skipped.
+func everyResultSkipped(latest map[string]Check) bool {
+	for _, c := range latest {
+		if c.Status != "skipped" {
+			return false
+		}
+	}
+	return true
 }

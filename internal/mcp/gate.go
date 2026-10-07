@@ -10,6 +10,7 @@ import (
 
 	"acline/internal/app"
 	"acline/internal/store"
+	"acline/internal/worktree"
 )
 
 // This file is the "dedicated pass" v1 deliberately deferred: task
@@ -68,6 +69,13 @@ type rejectOut struct {
 }
 
 func registerGateTools(s *sdkmcp.Server, st *store.Store) {
+	addTaskGateTool(s, st)
+	addTaskDoneTool(s, st)
+	addApproveTool(s, st)
+	addRejectTool(s, st)
+}
+
+func addTaskGateTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_task_gate",
 		Description: "Show whether a task can be completed, and what's missing (unrecorded verification, failing checks, missing human approval for high-risk/hitl tasks).",
@@ -83,7 +91,9 @@ func registerGateTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(summary), out, nil
 	})
+}
 
+func addTaskDoneTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_task_done",
 		Description: "Mark a task done, subject to the verification/approval gate. Without force=true, an " +
@@ -91,7 +101,7 @@ func registerGateTools(s *sdkmcp.Server, st *store.Store) {
 			"without --force). With force=true, the gate is overridden and recorded as an 'override' " +
 			"approval event, never silently skipped.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args taskDoneArgs) (*sdkmcp.CallToolResult, taskDoneOut, error) {
-		result, err := st.CompleteTaskForTree(args.ID, args.Force, args.Token, gateTreeForTask(st, args.ID))
+		result, err := app.CompleteTask(st, app.CompleteTaskRequest{TaskID: args.ID, Force: args.Force, Token: args.Token, Hash: worktree.Hash})
 		var blocked *store.GateBlockedError
 		if errors.As(err, &blocked) {
 			return nil, taskDoneOut{}, wrapErr(fmt.Sprintf(
@@ -108,7 +118,9 @@ func registerGateTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(summary), taskDoneOut{Overridden: overridden, Warnings: result.Warnings}, nil
 	})
+}
 
+func addApproveTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_approve",
 		Description: "Record human approval of a task (oversight evidence, not an implication). If the " +
@@ -116,7 +128,7 @@ func registerGateTools(s *sdkmcp.Server, st *store.Store) {
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args approveArgs) (*sdkmcp.CallToolResult, approveOut, error) {
 		aid, err := app.Approve(st, app.ApproveRequest{
 			TaskID: args.ID, Kind: args.Kind, By: args.By, Note: args.Note, Token: args.Token,
-			RoleArg: args.Role, ProjectArg: args.Project,
+			RoleArg: args.Role, ProjectArg: args.Project, Tree: treeForTask(st, args.ID),
 		})
 		if errors.Is(err, store.ErrAgentCannotApprove) {
 			return nil, approveOut{}, fmt.Errorf("%w: a person approves from their own terminal; an agent needs the approval token (`token` argument) — see `acline auth init`", err)
@@ -126,7 +138,9 @@ func registerGateTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("approval #%d recorded for task #%d", aid, args.ID)), approveOut{ID: aid}, nil
 	})
+}
 
+func addRejectTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_reject",
 		Description: "Record a rejection at review for a task.",

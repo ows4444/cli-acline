@@ -66,7 +66,8 @@ CREATE TABLE IF NOT EXISTS projects (
 	name             TEXT UNIQUE NOT NULL,
 	path             TEXT,
 	autonomy_default TEXT NOT NULL DEFAULT 'hotl',
-	created_at       TEXT NOT NULL
+	created_at       TEXT NOT NULL,
+	risk_default     TEXT NOT NULL DEFAULT 'low'
 );
 
 CREATE TABLE IF NOT EXISTS specs (
@@ -75,6 +76,7 @@ CREATE TABLE IF NOT EXISTS specs (
 	body        TEXT,
 	status      TEXT NOT NULL DEFAULT 'draft',
 	version     INTEGER NOT NULL DEFAULT 1,
+	superseded_by INTEGER REFERENCES specs(id),
 	project_id  INTEGER REFERENCES projects(id),
 	actor_type  TEXT,
 	actor_id    TEXT,
@@ -192,7 +194,8 @@ CREATE TABLE IF NOT EXISTS approvals (
 	approver   TEXT NOT NULL,
 	decision   TEXT NOT NULL,
 	note       TEXT,
-	created_at TEXT NOT NULL
+	created_at TEXT NOT NULL,
+	tree_hash  TEXT
 );
 
 CREATE TABLE IF NOT EXISTS checks (
@@ -411,7 +414,7 @@ BEGIN SELECT RAISE(ABORT, 'checks are append-only: they cannot be deleted'); END
 // Open skips the schema DDL entirely once user_version == schemaVersion, so
 // such a change must also bump this constant (with a no-op migration if there
 // is no column work) or existing installs will never create it.
-const schemaVersion = 13
+const schemaVersion = 16
 
 // SchemaVersion is the schema version this build reads and writes.
 func SchemaVersion() int { return schemaVersion }
@@ -689,9 +692,41 @@ var migrations = []migration{
 			return nil
 		},
 	},
+	{
+		// What code an approval was given for: the working-tree fingerprint the
+		// approver saw (see internal/worktree). The gate asks for a new approval
+		// when the code has changed since. Rows from before this migration have
+		// none, which the gate reports instead of blocking.
+		version: 14,
+		apply: func(tx *sql.Tx) error {
+			return ensureColumn(tx, "approvals", "tree_hash TEXT")
+		},
+	},
+	{
+		// A project's default risk for new tasks (`acline init` asks for it).
+		// Existing projects keep the old default, low.
+		version: 15,
+		apply: func(tx *sql.Tx) error {
+			return ensureColumn(tx, "projects", "risk_default TEXT NOT NULL DEFAULT 'low'")
+		},
+	},
+	{
+		// A spec can be superseded by another (SupersedeSpec), like a decision.
+		// `implemented` is no longer a stored status (see ValidSpecStatuses);
+		// nothing ever set it, but a row that has it is approved.
+		version: 16,
+		apply: func(tx *sql.Tx) error {
+			if err := ensureColumn(tx, "specs", "superseded_by INTEGER REFERENCES specs(id)"); err != nil {
+				return err
+			}
+			_, err := tx.Exec(`UPDATE specs SET status = 'approved' WHERE status = 'implemented'`)
+			return err
+		},
+	},
 }
 
-// indexesV13 are shared by `schema` (fresh stores) and migration 13.
+// indexesV13 are created by migration 13 only, not by `schema`: a fresh store
+// gets them because prepareSchema runs every migration after `schema`.
 var indexesV13 = []string{
 	`CREATE INDEX IF NOT EXISTS idx_events_type ON events(type)`,
 	`CREATE INDEX IF NOT EXISTS idx_tasks_project ON tasks(project_id)`,

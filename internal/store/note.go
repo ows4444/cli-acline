@@ -5,6 +5,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"acline/internal/redact"
 )
 
 type Note struct {
@@ -32,7 +34,7 @@ func (s *Store) AddNote(projectID *int64, body, source string) (int64, error) {
 
 // AddNoteWithRole is AddNote plus an explicit role_id (see Store.ResolveRole).
 func (s *Store) AddNoteWithRole(projectID, roleID *int64, body, source string) (int64, error) {
-	body = scrubText(body)
+	redacted := redact.Fields(&body)
 	if source == "" {
 		source = "manual"
 	}
@@ -40,15 +42,18 @@ func (s *Store) AddNoteWithRole(projectID, roleID *int64, body, source string) (
 		return 0, fmt.Errorf("invalid note source %q", source)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
-		`INSERT INTO notes (project_id, body, source, actor_type, actor_id, model, role_id, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		nullInt(projectID), body, source, s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), nullInt(roleID), now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
+	id, err := s.writeRecordWithEvent("note", "note_recorded", redacted, func(tx *sql.Tx) (int64, string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO notes (project_id, body, source, actor_type, actor_id, model, role_id, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			nullInt(projectID), body, source, s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), nullInt(roleID), now,
+		)
+		if err != nil {
+			return 0, "", err
+		}
+		id, err := res.LastInsertId()
+		return id, fmt.Sprintf("note #%d recorded (%s)", id, source), err
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -123,9 +128,6 @@ func (s *Store) ListNotes(f NoteFilter) ([]Note, error) {
 // MarkPromoted records that a note produced a decision or memory row, so it
 // drops out of the unpromoted queue `acline reflect` works from.
 func (s *Store) MarkPromoted(id int64, kind string, promotedID int64) error {
-	res, err := s.DB.Exec(`UPDATE notes SET promoted_to = ?, promoted_id = ? WHERE id = ?`, kind, promotedID, id)
-	if err != nil {
-		return err
-	}
-	return mustExist(res, "note", id)
+	return s.changeWithEvent("note", id, "note_promoted", fmt.Sprintf("note #%d promoted to %s #%d", id, kind, promotedID),
+		`UPDATE notes SET promoted_to = ?, promoted_id = ? WHERE id = ?`, kind, promotedID, id)
 }

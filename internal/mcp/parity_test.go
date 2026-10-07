@@ -89,3 +89,86 @@ func TestDecisionShowReturnsOneDecision(t *testing.T) {
 		t.Fatalf("unknown decision: IsError=%v code=%q, want not_found", r.IsError, errorCode(t, r))
 	}
 }
+
+func TestTaskAddTakesTypeMilestoneParentAndToken(t *testing.T) {
+	cs, st := connectedTestServerWithActor(t, store.Actor{Type: "agent", ID: "claude"})
+	ms, err := st.AddMilestone("v1", store.MilestoneOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	parent := callTool[taskAddOut](t, cs, "acline_task_add", taskAddArgs{Title: "epic"})
+	child := callTool[taskAddOut](t, cs, "acline_task_add", taskAddArgs{
+		Title: "part", Type: "bug", MilestoneID: &ms, ParentID: &parent.ID,
+	})
+	task, err := st.GetTask(child.ID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if task.Type.String != "bug" || task.MilestoneID.Int64 != ms || task.ParentID.Int64 != parent.ID {
+		t.Fatalf("task: type=%v milestone=%v parent=%v", task.Type, task.MilestoneID, task.ParentID)
+	}
+
+	// The CLI's errors, through the same use case.
+	missing := int64(999)
+	for name, args := range map[string]taskAddArgs{
+		"blank title":       {Title: " "},
+		"invalid type":      {Title: "t", Type: "chore"},
+		"missing milestone": {Title: "t", MilestoneID: &missing},
+		"missing parent":    {Title: "t", ParentID: &missing},
+	} {
+		if r := callToolRaw(t, cs, "acline_task_add", args); !r.IsError {
+			t.Errorf("%s: task added", name)
+		}
+	}
+
+	// autonomy auto is a person's choice; an agent needs the token.
+	if r := callToolRaw(t, cs, "acline_task_add", taskAddArgs{Title: "t", Autonomy: "auto"}); !r.IsError || errorCode(t, r) != "agent_cannot_loosen_task" {
+		t.Fatalf("auto without the token: IsError=%v code=%q, want agent_cannot_loosen_task", r.IsError, errorCode(t, r))
+	}
+	tok, err := st.EnableApprovalToken()
+	if err != nil {
+		t.Fatal(err)
+	}
+	auto := callTool[taskAddOut](t, cs, "acline_task_add", taskAddArgs{Title: "t", Autonomy: "auto", Token: tok})
+	if task, _ := st.GetTask(auto.ID); task.Autonomy != "auto" {
+		t.Fatalf("autonomy = %s, want auto", task.Autonomy)
+	}
+}
+
+func TestPlanReviseReplacesADraft(t *testing.T) {
+	cs, st := connectedTestServer(t)
+	spec, _ := st.AddSpec("Inventory", "Track stock.")
+	st.ApproveSpec(spec, "")
+	first := callTool[planProposeOut](t, cs, "acline_plan_propose", planProposeArgs{
+		SpecID: spec, Items: []planItemArgs{{Ref: "T1", Title: "Schema"}},
+	})
+
+	out := callTool[planReviseOut](t, cs, "acline_plan_revise", planReviseArgs{
+		ID: first.ID, Note: "split the API out",
+		Items: []planItemArgs{{Ref: "T1", Title: "Schema"}, {Ref: "T2", Title: "API", DependsOn: []string{"T1"}}},
+	})
+	if out.ID == first.ID || out.Supersedes != first.ID || out.Status != "draft" || out.Items != 2 {
+		t.Fatalf("revise = %+v", out)
+	}
+	if old, _ := st.GetPlan(first.ID); old.Status != "superseded" {
+		t.Errorf("revised draft is %s, want superseded", old.Status)
+	}
+	if p, _ := st.GetPlan(out.ID); p.Version != 2 {
+		t.Errorf("revision version = %d, want 2", p.Version)
+	}
+
+	// The superseded draft cannot be revised again, and the plan rules hold.
+	for name, args := range map[string]planReviseArgs{
+		"superseded": {ID: first.ID, Items: []planItemArgs{{Ref: "A", Title: "a"}}},
+		"auto":       {ID: out.ID, Items: []planItemArgs{{Ref: "A", Title: "a", Autonomy: "auto"}}},
+		"cycle":      {ID: out.ID, Items: []planItemArgs{{Ref: "A", Title: "a", DependsOn: []string{"B"}}, {Ref: "B", Title: "b", DependsOn: []string{"A"}}}},
+		"empty":      {ID: out.ID},
+	} {
+		if r := callToolRaw(t, cs, "acline_plan_revise", args); !r.IsError {
+			t.Errorf("%s: revision accepted", name)
+		}
+	}
+	if n := countRows(t, st, `SELECT COUNT(*) FROM tasks`); n != 0 {
+		t.Errorf("revising created %d task(s)", n)
+	}
+}

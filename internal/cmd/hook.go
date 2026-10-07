@@ -34,19 +34,13 @@ import (
 // a crash exits 2, which Claude Code treats as a block, where any other non-zero
 // exit would be a non-blocking error and let the tool call through.
 
-// hookTimeout bounds how long the guard may take before the call is denied.
-var hookTimeout = 10 * time.Second
-
-// guardRun is the guard; a variable so tests can make it fail.
-var guardRun = guardCheckTool
-
 // selfTimeout bounds each acline subprocess a hook starts.
 const selfTimeout = 10 * time.Second
 
-// runSelf runs this same binary with args from dir and returns its stdout. The
-// hooks call acline back (`dashboard`, `context export`, `note add`) rather than
-// re-implementing them, exactly as the Python scripts did.
-var runSelf = func(dir string, args ...string) (string, error) {
+// runSelfExec runs this same binary with args from dir and returns its stdout.
+// The hooks call acline back (`dashboard`, `context export`, `note add`) rather
+// than re-implementing them, exactly as the Python scripts did.
+func runSelfExec(dir string, args ...string) (string, error) {
 	exe, err := os.Executable()
 	if err != nil {
 		return "", err
@@ -67,9 +61,14 @@ var runSelf = func(dir string, args ...string) (string, error) {
 	return string(out), nil
 }
 
-var hookCmd = &cobra.Command{
-	Use:   "hook",
-	Short: "Claude Code hook entry points (run by .claude/settings.json; not for interactive use)",
+func newHookCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "hook",
+		Short: "Claude Code hook entry points (run by .claude/settings.json; not for interactive use)",
+	}
+	cmd.AddCommand(newHookPreToolUseCmd(c), newHookSessionStartCmd(c), newHookPreCompactCmd(c), newHookSessionEndCmd(c),
+		newHookPostToolUseCmd(c), newHookStopCmd(c))
+	return cmd
 }
 
 // hookProjectDir is the project the session belongs to: $CLAUDE_PROJECT_DIR, which
@@ -88,29 +87,29 @@ func hookProjectDir() string {
 func enterProjectDir() string {
 	dir := hookProjectDir()
 	if dir != "" {
-		if err := os.Chdir(dir); err == nil {
-			guardVault = defaultVaultPath()
-		}
+		_ = os.Chdir(dir)
 	}
 	return dir
 }
 
-var hookPreToolUseCmd = &cobra.Command{
-	Use:   "pre-tool-use",
-	Short: "PreToolUse: judge a tool call with the guard (fails closed)",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		enterProjectDir()
-		return runPreToolUse(os.Stdin, os.Stdout)
-	},
+func newHookPreToolUseCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:   "pre-tool-use",
+		Short: "PreToolUse: judge a tool call with the guard (fails closed)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			enterProjectDir()
+			return c.runPreToolUse(defaultVaultPath(), os.Stdin, os.Stdout)
+		},
+	}
 }
 
-// runPreToolUse runs the guard on the payload and forwards its decision. Every
-// way of not reaching one becomes a deny.
-func runPreToolUse(in io.Reader, out io.Writer) error {
+// runPreToolUse runs the guard on the payload, with the vault at vaultRoot, and
+// forwards its decision. Every way of not reaching one becomes a deny.
+func (c *cli) runPreToolUse(vaultRoot string, in io.Reader, out io.Writer) error {
 	// Read the tunables here, not inside the goroutine: after a timeout that
 	// goroutine keeps running, and must not touch state the caller may change.
-	guard, timeout := guardRun, hookTimeout
+	guard, timeout, s := c.guard, c.hookTimeout, c.st
 	payload, err := io.ReadAll(in)
 	if err != nil {
 		return writeHookDeny(out, "blocked: acline could not read the hook payload ("+err.Error()+")")
@@ -128,7 +127,7 @@ func runPreToolUse(in io.Reader, out io.Writer) error {
 			}
 			done <- o
 		}()
-		o.err = guard(bytes.NewReader(payload), &o.out)
+		o.err = guard(s, vaultRoot, bytes.NewReader(payload), &o.out)
 	}()
 	select {
 	case o := <-done:
@@ -149,13 +148,15 @@ func writeHookDeny(out io.Writer, reason string) error {
 	return json.NewEncoder(out).Encode(denyOutput(reason))
 }
 
-var hookSessionStartCmd = &cobra.Command{
-	Use:   "session-start",
-	Short: "SessionStart: inject the dashboard and the project's context, and record the running model",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runSessionStart(os.Stdin, os.Stdout, hookProjectDir(), os.Getenv("CLAUDE_ENV_FILE"))
-	},
+func newHookSessionStartCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:   "session-start",
+		Short: "SessionStart: inject the dashboard and the project's context, and record the running model",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return c.runSessionStart(os.Stdin, os.Stdout, hookProjectDir(), os.Getenv("CLAUDE_ENV_FILE"))
+		},
+	}
 }
 
 // runSessionStart prints the SessionStart hook's additionalContext: an unfinished
@@ -163,7 +164,7 @@ var hookSessionStartCmd = &cobra.Command{
 // export`. It also records the model that is actually running so every later
 // `acline` write carries it. A failing acline never fails the hook; the failure is
 // reported in the context instead.
-func runSessionStart(in io.Reader, out io.Writer, projectDir, envFile string) error {
+func (c *cli) runSessionStart(in io.Reader, out io.Writer, projectDir, envFile string) error {
 	var payload map[string]any
 	_ = json.NewDecoder(in).Decode(&payload) // an empty or garbled payload is fine
 	exportModel(payload, envFile)
@@ -172,11 +173,11 @@ func runSessionStart(in io.Reader, out io.Writer, projectDir, envFile string) er
 	if b, err := os.ReadFile(filepath.Join(projectDir, ".claude", "vault", "BOOTSTRAP.md")); err == nil {
 		sections = append(sections, "# ONBOARDING IN PROGRESS\n\n"+clip.WithoutFrontMatter(string(b)))
 	}
-	if dash := strings.TrimSpace(capSection(runAcline(projectDir, "dashboard"), maxDashboardBytes, "acline dashboard")); dash != "" {
+	if dash := strings.TrimSpace(capSection(c.runAcline(projectDir, "dashboard"), maxDashboardBytes, "acline dashboard")); dash != "" {
 		sections = append(sections, "# Dashboard\n\n```\n"+dash+"\n```")
 	}
 	sections = append(sections, capSection(
-		runAcline(projectDir, "context", "export", "--max-rows", strconv.Itoa(sessionContextRows)),
+		c.runAcline(projectDir, "context", "export", "--max-rows", strconv.Itoa(sessionContextRows)),
 		maxContextBytes, "acline context export"))
 
 	var kept []string
@@ -209,8 +210,8 @@ func capSection(text string, max int, fullCommand string) string {
 	return clip.Bytes(text, max) + "\n\n…(truncated for the session start; run `" + fullCommand + "` for all of it)\n"
 }
 
-func runAcline(dir string, args ...string) string {
-	out, err := runSelf(dir, args...)
+func (c *cli) runAcline(dir string, args ...string) string {
+	out, err := c.runSelf(dir, args...)
 	if err != nil {
 		return fmt.Sprintf("(acline %s failed to run: %v)", strings.Join(args, " "), err)
 	}
@@ -252,27 +253,31 @@ func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", `'"'"'`) + "'"
 }
 
-var hookPreCompactCmd = &cobra.Command{
-	Use:   "pre-compact",
-	Short: "PreCompact: record MEMORY_LOG lines from the transcript as notes before context is compacted away",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runMemoryLogHook(os.Stdin, hookProjectDir())
-	},
+func newHookPreCompactCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:   "pre-compact",
+		Short: "PreCompact: record MEMORY_LOG lines from the transcript as notes before context is compacted away",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return c.runMemoryLogHook(os.Stdin, hookProjectDir())
+		},
+	}
 }
 
-var hookSessionEndCmd = &cobra.Command{
-	Use:   "session-end",
-	Short: "SessionEnd: record MEMORY_LOG lines not yet captured",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runMemoryLogHook(os.Stdin, hookProjectDir())
-	},
+func newHookSessionEndCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:   "session-end",
+		Short: "SessionEnd: record MEMORY_LOG lines not yet captured",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return c.runMemoryLogHook(os.Stdin, hookProjectDir())
+		},
+	}
 }
 
 // runMemoryLogHook is shared by PreCompact and SessionEnd, which share per-session
 // state so nothing is recorded twice.
-func runMemoryLogHook(in io.Reader, projectDir string) error {
+func (c *cli) runMemoryLogHook(in io.Reader, projectDir string) error {
 	var payload struct {
 		SessionID      string `json:"session_id"`
 		TranscriptPath string `json:"transcript_path"`
@@ -282,7 +287,7 @@ func runMemoryLogHook(in io.Reader, projectDir string) error {
 		payload.SessionID = "unknown"
 	}
 	state := filepath.Join(projectDir, ".claude", "vault", ".state", "memory-log-captured.json")
-	captureMemoryLog(payload.SessionID, payload.TranscriptPath, state, projectDir)
+	c.captureMemoryLog(payload.SessionID, payload.TranscriptPath, state, projectDir)
 	return nil
 }
 
@@ -389,7 +394,7 @@ type memLogState struct {
 // Stop share per-session state, so each turn reads only what was appended since
 // the last one instead of the whole transcript again. Capture is best effort: a
 // failing or slow `acline note add` must not break the hook.
-func captureMemoryLog(sessionID, transcriptPath, statePath, projectDir string) {
+func (c *cli) captureMemoryLog(sessionID, transcriptPath, statePath, projectDir string) {
 	state := loadMemoryLogState(statePath)
 	st := state[sessionID]
 	if st == nil {
@@ -416,7 +421,7 @@ func captureMemoryLog(sessionID, transcriptPath, statePath, projectDir string) {
 			st.legacy--
 			continue
 		}
-		_, _ = runSelf(projectDir, "note", "add", line, "--source", "conversation")
+		_, _ = c.runSelf(projectDir, "note", "add", line, "--source", "conversation")
 	}
 	st.Offset = end
 	saveMemoryLogState(statePath, state)
@@ -484,9 +489,4 @@ func saveMemoryLogState(path string, state map[string]*memLogState) {
 	if err := os.Rename(tmp.Name(), path); err != nil {
 		os.Remove(tmp.Name())
 	}
-}
-
-func init() {
-	hookCmd.AddCommand(hookPreToolUseCmd, hookSessionStartCmd, hookPreCompactCmd, hookSessionEndCmd)
-	rootCmd.AddCommand(hookCmd)
 }

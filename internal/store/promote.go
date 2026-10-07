@@ -61,10 +61,8 @@ func (s *Store) PromoteNote(noteID int64, kind string, o PromoteOpts) (int64, er
 		if decision == "" {
 			decision = note.Body
 		}
+		// AddDecision records decision_recorded; MarkPromoted below links the note.
 		id, err = s.AddDecision(title, DecisionOpts{Scope: o.Scope, Context: o.Context, Decision: decision, Rationale: o.Rationale, ProjectID: projectID})
-		if err == nil {
-			s.LogEventGlobal("decision_recorded", fmt.Sprintf("decision #%d proposed from note #%d: %s", id, noteID, title))
-		}
 	case "memory":
 		id, err = s.AddMemory(o.MemoryArea, o.MemoryKind, note.Body, MemoryOpts{ProjectID: projectID, SourceKind: "note", SourceID: noteID})
 	}

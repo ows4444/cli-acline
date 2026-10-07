@@ -27,17 +27,6 @@ type CheckRunner struct {
 	CreatedAt string
 }
 
-func (s *Store) authorizeRunnerChange(token string) error {
-	viaToken, err := s.authorize(token)
-	if err != nil {
-		return err
-	}
-	if s.Actor.Type == "agent" && !viaToken {
-		return ErrAgentCannotConfigureRunner
-	}
-	return nil
-}
-
 // SetCheckRunner sets (or replaces) the command `check run` uses for kind in
 // a project, overriding the built-in Go default. Human-only; see
 // ErrAgentCannotConfigureRunner.
@@ -49,7 +38,7 @@ func (s *Store) SetCheckRunner(projectID int64, kind, command, token string) err
 	if command == "" {
 		return errors.New("runner command is empty")
 	}
-	if err := s.authorizeRunnerChange(token); err != nil {
+	if err := s.requirePerson(token, ErrAgentCannotConfigureRunner); err != nil {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
@@ -66,7 +55,7 @@ func (s *Store) SetCheckRunner(projectID int64, kind, command, token string) err
 
 // UnsetCheckRunner removes a project's override, restoring the default.
 func (s *Store) UnsetCheckRunner(projectID int64, kind, token string) error {
-	if err := s.authorizeRunnerChange(token); err != nil {
+	if err := s.requirePerson(token, ErrAgentCannotConfigureRunner); err != nil {
 		return err
 	}
 	return s.writeWithEvent(nil, "check_runner_set", func(tx *sql.Tx) (string, error) {

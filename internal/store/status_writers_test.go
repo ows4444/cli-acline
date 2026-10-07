@@ -23,6 +23,8 @@ var reviewedStatusWriters = map[string]string{
 	"AcceptDecision":          "requirePerson",
 	"RejectDecision":          "retireDecision: requirePerson once accepted; rejecting a proposal only tightens",
 	"SupersedeDecision":       "retireDecision: requirePerson once accepted",
+	"DeprecateDecision":       "retireDecision: requirePerson (only an accepted decision can be deprecated)",
+	"SupersedeSpec":           "requirePerson once approved; superseding a draft only tightens",
 	"ApproveSpec":             "requirePerson",
 	"ReviseSpec":              "only ever withdraws approval (approved -> draft), recorded as spec_revised",
 	"ReviewMemory":            "authorize; approving needs a person",
@@ -30,12 +32,14 @@ var reviewedStatusWriters = map[string]string{
 	"CompleteTaskForTree":     "the completion gate; --force needs a person",
 	"SetTaskStatus":           "refuses done (ErrStatusDoneNeedsGate)",
 	"SetTaskStatusWithReason": "refuses done (ErrStatusDoneNeedsGate)",
+	"UpdateTask":              "refuses done (ErrStatusDoneNeedsGate); loosening risk/autonomy needs requirePerson",
 	"BeginSession":            "only moves the task to in_progress",
 	"ApprovePlan":             "requirePerson",
 	"RejectPlan":              "rejecting only tightens",
 	"RevisePlan":              "a new draft supersedes the previous draft only",
 	"SetFeatureStatus":        "features are descriptive, not gate inputs",
 	"SetMilestoneStatus":      "milestones are descriptive, not gate inputs",
+	"UpdateMilestone":         "milestones are descriptive, not gate inputs",
 }
 
 var statusWriteRe = regexp.MustCompile(`(?is)UPDATE\s+\w+\s+SET\b[^;]*\bstatus\s*=`)

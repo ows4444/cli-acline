@@ -2,6 +2,7 @@ package orchestrate
 
 import (
 	"context"
+	"os"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -150,7 +151,10 @@ func TestStepLaunchesTheRoutedStepAndRecordsIt(t *testing.T) {
 	t.Setenv("ACLINE_APPROVAL_TOKEN", "must-not-leak")
 	s := newAgentStore(t)
 	id := readyTask(t, s, store.TaskOpts{Area: "store"})
-	f := &fakeAgent{res: AgentResult{CostUSD: 0.25}, do: func(AgentRequest) { s.AddCheck(id, "test", "pass", "ok") }}
+	// The step's agent verifies the way an agent must: a check acline ran.
+	f := &fakeAgent{res: AgentResult{CostUSD: 0.25}, do: func(AgentRequest) {
+		s.AddCheckWithMeta(id, nil, "test", "pass", "ok", "", store.CheckMeta{Source: store.CheckSourceRunner})
+	}}
 
 	rep, err := Step(context.Background(), s, f, opts())
 	if err != nil {
@@ -256,7 +260,7 @@ func TestStepDoesNotLaunchWhenItShouldNot(t *testing.T) {
 		{"ready to complete", func(s *store.Store) (Options, int64) {
 			id := readyTask(t, s, store.TaskOpts{})
 			s.SetTaskStatus(id, "in_progress")
-			s.AddCheck(id, "test", "pass", "")
+			s.AddCheckWithMeta(id, nil, "test", "pass", "", "", store.CheckMeta{Source: store.CheckSourceRunner})
 			return opts(), id
 		}, StopComplete},
 		{"session already active", func(s *store.Store) (Options, int64) {
@@ -383,7 +387,9 @@ func TestRunChainsOnlyAutoTasksAndHonoursItsBounds(t *testing.T) {
 			low, _ = s.AddTask("ordinary", "", "low", store.TaskOpts{Autonomy: "auto"})
 		})
 		s.AddCriterion(low, "When X, the system shall Y")
-		f := &fakeAgent{do: func(AgentRequest) { s.AddCheck(low, "test", "pass", "") }}
+		f := &fakeAgent{do: func(AgentRequest) {
+			s.AddCheckWithMeta(low, nil, "test", "pass", "", "", store.CheckMeta{Source: store.CheckSourceRunner})
+		}}
 		rep, _ := Run(context.Background(), s, f, opts())
 		if f.calls != 1 || rep.Steps[0].TaskID != low {
 			t.Fatalf("calls=%d steps=%+v", f.calls, rep.Steps)
@@ -497,5 +503,78 @@ func TestStepIgnoresViolationsFromOtherSessions(t *testing.T) {
 	}
 	if rep.Stop == StopViolation || rep.Violations != 0 {
 		t.Fatalf("a violation outside the step's session was counted: %+v", rep)
+	}
+}
+
+// The agent ran in the orchestrator's working directory whatever task was
+// picked, so a task of project B launched from project A's folder had the
+// agent edit A's code.
+func TestStepRunsTheAgentInTheTasksProjectDirectory(t *testing.T) {
+	s := newAgentStore(t)
+	here, there := t.TempDir(), t.TempDir()
+	var pid int64
+	var err error
+	asPerson(s, func() { pid, err = s.AddProject("there", there, "") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyTask(t, s, store.TaskOpts{ProjectID: &pid})
+	o := opts()
+	o.Dir = here
+	f := &fakeAgent{}
+	if _, err := Step(context.Background(), s, f, o); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.reqs) != 1 {
+		t.Fatalf("launches = %d", len(f.reqs))
+	}
+	if got := store.RealPath(f.reqs[0].Dir); got != store.RealPath(there) {
+		t.Errorf("the agent ran in %s, want the task's project %s (the launcher was in %s)", got, there, here)
+	}
+}
+
+// A task with no registered project path still runs where the launcher is.
+func TestStepFallsBackToTheLaunchDirectoryWithoutAProjectPath(t *testing.T) {
+	s := newAgentStore(t)
+	here := t.TempDir()
+	readyTask(t, s, store.TaskOpts{})
+	o := opts()
+	o.Dir = here
+	f := &fakeAgent{}
+	if _, err := Step(context.Background(), s, f, o); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.reqs) != 1 || f.reqs[0].Dir != here {
+		t.Fatalf("dir = %v, want %s", f.reqs, here)
+	}
+}
+
+// The guard preflight looked at the launcher's directory; the agent now runs in
+// the task's project, so that is where the guard hook must be installed.
+func TestStepChecksTheGuardHookInTheTasksProject(t *testing.T) {
+	s := newAgentStore(t)
+	here, there := t.TempDir(), t.TempDir()
+	settings := `{"hooks":{"PreToolUse":[{"matcher":"Read|Edit|Write|Bash","hooks":[{"type":"command","command":"acline hook pre-tool-use || exit 2"}]}]}}`
+	if err := os.MkdirAll(filepath.Join(here, ".claude"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(here, ".claude", "settings.json"), []byte(settings), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	var pid int64
+	var err error
+	asPerson(s, func() { pid, err = s.AddProject("there", there, "") })
+	if err != nil {
+		t.Fatal(err)
+	}
+	readyTask(t, s, store.TaskOpts{ProjectID: &pid})
+	o := opts()
+	o.Dir, o.GuardTools = here, []string{"Read", "Edit", "Write", "Bash"}
+	f := &fakeAgent{}
+	if _, err := Step(context.Background(), s, f, o); err == nil || !strings.Contains(err.Error(), there) {
+		t.Fatalf("Step = %v, want a refusal naming %s (no guard there)", err, there)
+	}
+	if f.calls != 0 {
+		t.Fatal("an agent was launched in a project with no guard hook")
 	}
 }

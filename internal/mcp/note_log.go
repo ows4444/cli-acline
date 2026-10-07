@@ -2,11 +2,12 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"acline/internal/redact"
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -17,7 +18,8 @@ type noteAddArgs struct {
 }
 
 type noteAddOut struct {
-	ID int64 `json:"id"`
+	ID              int64 `json:"id"`
+	SecretsRedacted bool  `json:"secrets_redacted,omitempty"`
 }
 
 type logArgs struct {
@@ -29,62 +31,46 @@ type logArgs struct {
 }
 
 type logOut struct {
-	ID int64 `json:"id"`
+	ID              int64 `json:"id"`
+	SecretsRedacted bool  `json:"secrets_redacted,omitempty"`
 }
 
 func registerNoteAndLogTools(s *sdkmcp.Server, st *store.Store) {
+	addNoteAddTool(s, st)
+	addLogTool(s, st)
+}
+
+func addNoteAddTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_note_add",
 		Description: "Record a fast, unstructured capture -- the landing zone before a human decides whether it's durable enough to promote into a decision or memory entry.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args noteAddArgs) (*sdkmcp.CallToolResult, noteAddOut, error) {
-		if args.Body == "" {
-			return nil, noteAddOut{}, fmt.Errorf("body is required")
-		}
-		projectID, err := resolveProject(st, args.Project)
+		res, err := app.AddNote(st, app.AddNoteRequest{Body: args.Body, RoleArg: args.Role, ProjectArg: args.Project})
 		if err != nil {
 			return nil, noteAddOut{}, err
 		}
-		roleID, err := resolveRole(st, args.Role, args.Project)
-		if err != nil {
-			return nil, noteAddOut{}, err
-		}
-		id, err := st.AddNoteWithRole(projectID, roleID, args.Body, "manual")
-		if err != nil {
-			return nil, noteAddOut{}, err
-		}
-		return textResult(fmt.Sprintf("note #%d recorded", id)), noteAddOut{ID: id}, nil
+		return textResult(recordedSummary("note", res)), noteAddOut{ID: res.ID, SecretsRedacted: res.Redacted}, nil
 	})
+}
 
+func addLogTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_log",
 		Description: "Record a history event (decision/bug/commit/blocker/note) in the append-only audit trail; type is required. History events never reach /reflect -- use acline_note_add for that. Any live secret value pasted in message is redacted before storage.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args logArgs) (*sdkmcp.CallToolResult, logOut, error) {
-		if args.Message == "" {
-			return nil, logOut{}, fmt.Errorf("message is required")
-		}
-		logType := args.Type
-		if logType == "" {
+		res, err := app.Log(st, app.LogRequest{
+			Type: args.Type, Message: args.Message, TaskID: args.TaskID, RoleArg: args.Role, ProjectArg: args.Project,
+		})
+		if errors.Is(err, app.ErrLogTypeRequired) {
 			return nil, logOut{}, fmt.Errorf("type is required (decision|bug|commit|blocker|note); to capture a note for /reflect, use acline_note_add instead")
 		}
-		if !store.UserLogTypes[logType] {
-			return nil, logOut{}, fmt.Errorf("invalid type %q (want: note|decision|bug|commit|blocker)", logType)
-		}
-		roleID, err := resolveRole(st, args.Role, args.Project)
 		if err != nil {
 			return nil, logOut{}, err
 		}
-		message, redacted := redact.Secrets(args.Message)
-		var sessionID *int64
-		if sess, err := st.CurrentSession(); err == nil {
-			sessionID = &sess.ID
+		msg := fmt.Sprintf("event #%d logged", res.ID)
+		if res.Redacted {
+			msg += " (a pasted secret value was redacted before recording)"
 		}
-		id, err := st.LogEventWithRole(args.TaskID, sessionID, roleID, logType, message)
-		if err != nil {
-			return nil, logOut{}, err
-		}
-		if redacted {
-			st.LogEventGlobal("secret_redacted", fmt.Sprintf("log event #%d: a pasted secret value was redacted before recording", id))
-		}
-		return textResult(fmt.Sprintf("event #%d logged", id)), logOut{ID: id}, nil
+		return textResult(msg), logOut{ID: res.ID, SecretsRedacted: res.Redacted}, nil
 	})
 }

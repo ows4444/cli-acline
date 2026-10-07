@@ -6,6 +6,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -29,10 +30,10 @@ func toDependencyOut(d store.Dependency) dependencyOut {
 
 type depAddArgs struct {
 	Ecosystem string `json:"ecosystem" jsonschema:"e.g. npm, pypi, go, cargo"`
-	Name      string `json:"name" jsonschema:"package name"`
+	Name      string `json:"name" jsonschema:"package name; name@version is split when version is not given"`
 	Version   string `json:"version,omitempty"`
 	TaskID    *int64 `json:"task_id,omitempty" jsonschema:"the task that introduced this dependency"`
-	Project   string `json:"project,omitempty" jsonschema:"project name to scope this dependency to"`
+	Project   string `json:"project,omitempty" jsonschema:"project name to scope this dependency to (default: the task's project)"`
 	Verified  bool   `json:"verified,omitempty" jsonschema:"the package is confirmed to exist and be the real published artifact (default false -- unverified). Only a person, or a holder of the approval token, may set this."`
 	Token     string `json:"token,omitempty" jsonschema:"human approval token; needed with verified=true when the store has one enabled or the server's actor is an agent"`
 }
@@ -64,6 +65,12 @@ type depVerifyOut struct {
 }
 
 func registerDepTools(s *sdkmcp.Server, st *store.Store) {
+	addDepAddTool(s, st)
+	addDepListTool(s, st)
+	addDepVerifyTool(s, st)
+}
+
+func addDepAddTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_dep_add",
 		Description: "Record a package introduced into the project (supply-chain provenance). Lands " +
@@ -71,35 +78,23 @@ func registerDepTools(s *sdkmcp.Server, st *store.Store) {
 			"(not a hallucinated or typosquatted name) before installing, then verify=true or " +
 			"acline_dep_verify it.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args depAddArgs) (*sdkmcp.CallToolResult, depAddOut, error) {
-		if args.Ecosystem == "" || args.Name == "" {
-			return nil, depAddOut{}, fmt.Errorf("ecosystem and name are required")
-		}
-		if args.TaskID != nil {
-			if _, err := st.GetTask(*args.TaskID); err != nil {
-				return nil, depAddOut{}, err
-			}
-		}
-		projectID, err := resolveProject(st, args.Project)
+		id, name, version, err := app.AddDependency(st, app.AddDependencyRequest{
+			Ecosystem: args.Ecosystem, Name: args.Name, Version: args.Version, TaskID: args.TaskID,
+			ProjectArg: args.Project, Verified: args.Verified, Token: args.Token,
+		})
 		if err != nil {
 			return nil, depAddOut{}, err
 		}
-		id, err := st.AddDependencyWithToken(args.TaskID, projectID, args.Ecosystem, args.Name, args.Version, args.Verified, args.Token)
-		if err != nil {
-			return nil, depAddOut{}, err
-		}
-		message := fmt.Sprintf("%s %s@%s", args.Ecosystem, args.Name, args.Version)
-		if args.TaskID != nil {
-			st.LogTaskEvent(*args.TaskID, "dependency_added", message)
-		} else {
-			st.LogEventGlobal("dependency_added", message)
-		}
+		message := fmt.Sprintf("%s %s@%s", args.Ecosystem, name, version)
 		summary := fmt.Sprintf("dependency #%d recorded: %s", id, message)
 		if !args.Verified {
 			summary += " (unverified -- confirm it's the real published artifact before installing)"
 		}
 		return textResult(summary), depAddOut{ID: id, Verified: args.Verified}, nil
 	})
+}
 
+func addDepListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_dep_list",
 		Description: "List recorded dependencies, optionally restricted to a project or to unverified ones.",
@@ -119,12 +114,14 @@ func registerDepTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d dependenc(ies)", len(page))), out, nil
 	})
+}
 
+func addDepVerifyTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_dep_verify",
 		Description: "Mark a dependency verified as the real published artifact. A person's confirmation: refused for an agent unless it presents the approval token.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args depVerifyArgs) (*sdkmcp.CallToolResult, depVerifyOut, error) {
-		if err := st.VerifyDependencyWithToken(args.ID, args.Token); err != nil {
+		if err := app.VerifyDependency(st, args.ID, args.Token); err != nil {
 			return nil, depVerifyOut{}, err
 		}
 		return textResult(fmt.Sprintf("dependency #%d verified", args.ID)), depVerifyOut{ID: args.ID}, nil

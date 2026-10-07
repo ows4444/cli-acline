@@ -20,6 +20,7 @@ type Approval struct {
 	Model     sql.NullString
 	RoleID    sql.NullInt64
 	CreatedAt string
+	TreeHash  sql.NullString // the code the approval was given for, when known
 }
 
 type Check struct {
@@ -102,6 +103,11 @@ func (s *Store) AddApproval(taskID int64, kind, approver, decision, note string)
 // stamped the same way every other table already does -- approvals was the
 // one table with no actor columns at all before this.
 func (s *Store) AddApprovalWithRole(taskID int64, roleID *int64, kind, approver, decision, note string) (int64, error) {
+	return s.addApproval(taskID, roleID, kind, approver, decision, note, "")
+}
+
+// addApproval is AddApprovalWithRole plus the tree the approval is about.
+func (s *Store) addApproval(taskID int64, roleID *int64, kind, approver, decision, note, tree string) (int64, error) {
 	note = scrubText(note)
 	if !ValidApprovalKinds[kind] {
 		return 0, fmt.Errorf("invalid approval kind %q", kind)
@@ -118,8 +124,15 @@ func (s *Store) AddApprovalWithRole(taskID int64, roleID *int64, kind, approver,
 		return 0, err
 	}
 	defer tx.Rollback()
-	id, err := s.insertApproval(tx, sessionID, taskID, roleID, kind, approver, decision, note)
+	id, err := s.insertApproval(tx, sessionID, taskID, roleID, kind, approver, decision, note, tree)
 	if err != nil {
+		return 0, err
+	}
+	msg := fmt.Sprintf("%s (%s)", decision, kind)
+	if decision == "rejected" {
+		msg = "rejected at review: " + note
+	}
+	if _, err := s.logEventTx(tx, &taskID, sessionID, roleID, "approval", msg); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -136,8 +149,14 @@ type sqlExecer interface {
 	Exec(query string, args ...any) (sql.Result, error)
 }
 
+// sqlExecQuerier is a *sql.DB or *sql.Tx that also reads one row.
+type sqlExecQuerier interface {
+	sqlExecer
+	rowQuerier
+}
+
 // insertApproval writes the approval and its row_seal in the caller's tx.
-func (s *Store) insertApproval(tx *sql.Tx, sessionID *int64, taskID int64, roleID *int64, kind, approver, decision, note string) (int64, error) {
+func (s *Store) insertApproval(tx *sql.Tx, sessionID *int64, taskID int64, roleID *int64, kind, approver, decision, note, tree string) (int64, error) {
 	if approver == "" {
 		approver = s.Actor.ID
 	}
@@ -146,9 +165,9 @@ func (s *Store) insertApproval(tx *sql.Tx, sessionID *int64, taskID int64, roleI
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	res, err := tx.Exec(
-		`INSERT INTO approvals (task_id, kind, approver, decision, note, actor_type, actor_id, model, role_id, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		taskID, kind, approver, decision, nullStr(note), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), nullInt(roleID), now,
+		`INSERT INTO approvals (task_id, kind, approver, decision, note, actor_type, actor_id, model, role_id, created_at, tree_hash)
+		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		taskID, kind, approver, decision, nullStr(note), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), nullInt(roleID), now, nullStr(tree),
 	)
 	if err != nil {
 		return 0, err
@@ -157,7 +176,7 @@ func (s *Store) insertApproval(tx *sql.Tx, sessionID *int64, taskID int64, roleI
 	if err != nil {
 		return 0, err
 	}
-	dig := approvalDigest(id, taskID, kind, approver, decision, note, s.Actor.Type, s.Actor.ID, s.Actor.Model, roleStr(roleID), now)
+	dig := approvalDigest(id, taskID, kind, approver, decision, note, s.Actor.Type, s.Actor.ID, s.Actor.Model, roleStr(roleID), now, tree)
 	if err := s.sealRow(tx, "approvals", id, taskID, sessionID, dig); err != nil {
 		return 0, err
 	}
@@ -166,7 +185,7 @@ func (s *Store) insertApproval(tx *sql.Tx, sessionID *int64, taskID int64, roleI
 
 func (s *Store) ListApprovals(taskID int64) ([]Approval, error) {
 	rows, err := s.DB.Query(
-		`SELECT id, task_id, kind, approver, decision, note, actor_type, actor_id, model, role_id, created_at
+		`SELECT id, task_id, kind, approver, decision, note, actor_type, actor_id, model, role_id, created_at, tree_hash
 		 FROM approvals WHERE task_id = ? ORDER BY id`, taskID)
 	if err != nil {
 		return nil, err
@@ -176,7 +195,7 @@ func (s *Store) ListApprovals(taskID int64) ([]Approval, error) {
 	for rows.Next() {
 		var a Approval
 		if err := rows.Scan(&a.ID, &a.TaskID, &a.Kind, &a.Approver, &a.Decision, &a.Note,
-			&a.ActorType, &a.ActorID, &a.Model, &a.RoleID, &a.CreatedAt); err != nil {
+			&a.ActorType, &a.ActorID, &a.Model, &a.RoleID, &a.CreatedAt, &a.TreeHash); err != nil {
 			return nil, err
 		}
 		out = append(out, a)
@@ -258,6 +277,9 @@ func (s *Store) AddCheckWithMeta(taskID int64, roleID *int64, kind, status, deta
 	}
 	dig := checkDigest(id, taskID, kind, status, detail, s.Actor.Type, s.Actor.ID, roleStr(roleID), now, meta.Source, meta.TreeHash)
 	if err := s.sealRow(tx, "checks", id, taskID, sessionID, dig); err != nil {
+		return 0, err
+	}
+	if _, err := s.logEventTx(tx, &taskID, sessionID, roleID, "check", fmt.Sprintf("%s: %s (%s)", kind, status, meta.Source)); err != nil {
 		return 0, err
 	}
 	if err := tx.Commit(); err != nil {
@@ -342,6 +364,30 @@ func (s *Store) approvalSatisfiesRole(roleID sql.NullInt64) (bool, error) {
 type GateResult struct {
 	Blockers []string
 	Warnings []string
+	// PersonBlockers are the Blockers only a person can clear: the code
+	// review approval. An agent clears the others by running checks.
+	PersonBlockers []string
+}
+
+// blockForPerson adds a blocker only a person can clear.
+func (g *GateResult) blockForPerson(msg string) {
+	g.Blockers = append(g.Blockers, msg)
+	g.PersonBlockers = append(g.PersonBlockers, msg)
+}
+
+// AgentBlockers are the Blockers that are not PersonBlockers.
+func (g GateResult) AgentBlockers() []string {
+	person := make(map[string]bool, len(g.PersonBlockers))
+	for _, b := range g.PersonBlockers {
+		person[b] = true
+	}
+	var out []string
+	for _, b := range g.Blockers {
+		if !person[b] {
+			out = append(out, b)
+		}
+	}
+	return out
 }
 
 func (g GateResult) OK() bool { return len(g.Blockers) == 0 }
@@ -357,8 +403,8 @@ func (s *Store) EvaluateGate(taskID int64) (GateResult, error) {
 
 // EvaluateGateForTree is EvaluateGate with the current fingerprint of the
 // working tree (internal/worktree; "" when unknown). It adds the provenance
-// rules: a passing check that was hand-recorded by an agent draws a warning, one
-// about a different tree draws a warning, and for high/critical risk the passing
+// rules: a passing check that was hand-recorded by an agent blocks, one about a
+// different tree draws a warning, and for high/critical risk the passing
 // evidence must include a check acline itself ran (`check run`) and must not be
 // about code that has since changed.
 func (s *Store) EvaluateGateForTree(taskID int64, currentTree string) (GateResult, error) {
@@ -368,11 +414,26 @@ func (s *Store) EvaluateGateForTree(taskID int64, currentTree string) (GateResul
 	if err != nil {
 		return g, err
 	}
-
 	checks, err := s.ListChecks(taskID)
 	if err != nil {
 		return g, err
 	}
+	latestChecks := evaluateChecks(t, checks, &g)
+	s.evaluateEvidenceProvenance(t, checks, latestChecks, currentTree, &g)
+	if err := s.evaluateApproval(t, currentTree, &g); err != nil {
+		return g, err
+	}
+	if err := s.evaluateOpenWork(taskID, &g); err != nil {
+		return g, err
+	}
+	return g, nil
+}
+
+// evaluateChecks adds the blockers the task's recorded checks call for (none,
+// failing, all skipped, a skipped security scan at high risk) and returns the
+// checks with the newest result per kind, which the provenance rules read too.
+func evaluateChecks(t *Task, checks []Check, g *GateResult) map[string]Check {
+	taskID := t.ID
 	// Checks are append-only, so the newest result for each check kind is its
 	// current state. A repaired test run must supersede an earlier failure.
 	latestChecks := make(map[string]Check)
@@ -394,8 +455,12 @@ func (s *Store) EvaluateGateForTree(taskID int64, currentTree string) (GateResul
 	if failed > 0 {
 		g.Blockers = append(g.Blockers, fmt.Sprintf("%d check(s) failing", failed))
 	}
+	// Skipped is never evidence: when every newest result is
+	// skipped nothing was verified, at any risk.
 	if len(latestChecks) > 0 && passed == 0 && failed == 0 {
-		g.Warnings = append(g.Warnings, "all recorded checks were skipped")
+		g.Blockers = append(g.Blockers, fmt.Sprintf(
+			"nothing was verified: every recorded check was skipped (a skip is not evidence) — run one acline can run: acline check run %d --kind test",
+			taskID))
 	}
 
 	// A skipped security scan is not evidence. On high/critical-risk work a
@@ -411,56 +476,82 @@ func (s *Store) EvaluateGateForTree(taskID int64, currentTree string) (GateResul
 			}
 		}
 	}
+	return latestChecks
+}
 
-	s.evaluateEvidenceProvenance(t, checks, latestChecks, currentTree, &g)
-
-	needsApproval := t.Autonomy == "hitl" || t.Risk == "high" || t.Risk == "critical"
-	if needsApproval {
-		approvals, err := s.ListApprovals(taskID)
-		if err != nil {
-			return g, err
+// evaluateApproval adds what the task's code review approval calls for, when
+// its risk or autonomy needs one: the newest code_review decision controls, it
+// must be about the current code, and it must carry a can_approve role once
+// the project has one.
+func (s *Store) evaluateApproval(t *Task, currentTree string, g *GateResult) error {
+	if !(t.Autonomy == "hitl" || t.Risk == "high" || t.Risk == "critical") {
+		return nil
+	}
+	taskID := t.ID
+	approvals, err := s.ListApprovals(taskID)
+	if err != nil {
+		return err
+	}
+	// Approval decisions are also append-only. The newest code_review
+	// decision controls; a later rejection revokes an earlier approval.
+	// The override kind is a separate, unrelated gate (see task.go's
+	// `task done --force`) and must not affect this one.
+	var approved bool
+	var latest Approval
+	for _, a := range approvals {
+		if a.Kind != "code_review" {
+			continue
 		}
-		// Approval decisions are also append-only. The newest code_review
-		// decision controls; a later rejection revokes an earlier approval.
-		// The override kind is a separate, unrelated gate (see task.go's
-		// `task done --force`) and must not affect this one.
-		var approved bool
-		var latest Approval
-		for _, a := range approvals {
-			if a.Kind != "code_review" {
-				continue
-			}
-			if a.Decision == "approved" || a.Decision == "rejected" {
-				approved = a.Decision == "approved"
-				latest = a
-			}
-		}
-		if !approved {
-			g.Blockers = append(g.Blockers, fmt.Sprintf(
-				"human approval required (risk=%s, autonomy=%s) — use: acline approve %d --kind code_review",
-				t.Risk, t.Autonomy, taskID))
-		} else if roled, err := s.hasApprovingRole(nullIntPtr(t.ProjectID)); err != nil {
-			return g, err
-		} else if roled {
-			// Roles feature (spec #2): once a project has configured at
-			// least one can_approve role, the approving role must be one
-			// of them, not just any human --by. A project that has never
-			// touched roles has none with can_approve=1, so `roled` is
-			// false and this branch never runs — old behavior, unchanged.
-			ok, err := s.approvalSatisfiesRole(latest.RoleID)
-			if err != nil {
-				return g, err
-			}
-			if !ok {
-				g.Blockers = append(g.Blockers, fmt.Sprintf(
-					"the latest approval (#%d) has no can_approve role attached — use: acline approve %d --role <manager|scrummaster|...>",
-					latest.ID, taskID))
-			}
+		if a.Decision == "approved" || a.Decision == "rejected" {
+			approved = a.Decision == "approved"
+			latest = a
 		}
 	}
+	treeKnown := currentTree != "" && currentTree != TreeUnavailable
+	stale := approved && latest.TreeHash.Valid && treeKnown && latest.TreeHash.String != currentTree
+	switch {
+	case !approved:
+		g.blockForPerson(fmt.Sprintf(
+			"human approval required (risk=%s, autonomy=%s) — use: acline approve %d --kind code_review",
+			t.Risk, t.Autonomy, taskID))
+	case stale:
+		// The person approved other code: what is here now has not been approved.
+		g.blockForPerson(fmt.Sprintf(
+			"the approval (#%d) was given for a different version of the code than the current one — the code changed since; ask for a new approval: acline approve %d --kind code_review",
+			latest.ID, taskID))
+	case !latest.TreeHash.Valid && treeKnown:
+		g.Warnings = append(g.Warnings, fmt.Sprintf(
+			"the approval (#%d) is not tied to a version of the code (recorded before approvals carried one), so a change since it cannot be seen",
+			latest.ID))
+	}
+	if approved && !stale {
+		// Roles feature (spec #2): once a project has configured at
+		// least one can_approve role, the approving role must be one
+		// of them, not just any human --by. A project that has never
+		// touched roles has none with can_approve=1, so `roled` is
+		// false and this check never applies — old behavior, unchanged.
+		roled, err := s.hasApprovingRole(nullIntPtr(t.ProjectID))
+		if err != nil {
+			return err
+		}
+		ok, err := s.approvalSatisfiesRole(latest.RoleID)
+		if err != nil {
+			return err
+		}
+		if roled && !ok {
+			g.blockForPerson(fmt.Sprintf(
+				"the latest approval (#%d) has no can_approve role attached — use: acline approve %d --role <manager|scrummaster|...>",
+				latest.ID, taskID))
+		}
+	}
+	return nil
+}
 
+// evaluateOpenWork warns about prerequisites not done and unchecked
+// acceptance criteria: finishing ahead of either can be deliberate, but never silent.
+func (s *Store) evaluateOpenWork(taskID int64, g *GateResult) error {
 	if open, err := s.OpenPrerequisites(taskID); err != nil {
-		return g, err
+		return err
 	} else {
 		// A warning, not a blocker: finishing ahead of a prerequisite can be a
 		// deliberate call, but it should never be a silent one.
@@ -471,7 +562,7 @@ func (s *Store) EvaluateGateForTree(taskID int64, currentTree string) (GateResul
 
 	criteria, err := s.ListCriteria(taskID)
 	if err != nil {
-		return g, err
+		return err
 	}
 	var openCriteria int
 	for _, c := range criteria {
@@ -482,8 +573,7 @@ func (s *Store) EvaluateGateForTree(taskID int64, currentTree string) (GateResul
 	if openCriteria > 0 {
 		g.Warnings = append(g.Warnings, fmt.Sprintf("%d acceptance criterion/criteria still unchecked", openCriteria))
 	}
-
-	return g, nil
+	return nil
 }
 
 // TreeUnavailable is the current tree an adapter passes when it knows which
@@ -542,16 +632,13 @@ func (s *Store) evaluateEvidenceProvenance(t *Task, all []Check, latest map[stri
 				}
 			}
 			// At high risk every runnable kind's pass must come from the runner, so
-			// one runner pass of another kind cannot carry a typed one through.
+			// one runner pass of another kind cannot carry a typed one through. And
+			// at any risk an agent cannot vouch for its own work: its typed pass of
+			// a kind acline can run never counts; it runs the check instead.
 			if highRisk || c.ActorType.String == "agent" {
-				msg := fmt.Sprintf(
+				g.Blockers = append(g.Blockers, fmt.Sprintf(
 					"%s check passed by hand (recorded by %s), not run by acline — run: acline check run %d --kind %s",
-					kind, c.ActorID.String, t.ID, kind)
-				if highRisk {
-					g.Blockers = append(g.Blockers, msg)
-				} else {
-					g.Warnings = append(g.Warnings, msg)
-				}
+					kind, c.ActorID.String, t.ID, kind))
 			}
 		}
 		differs := treeKnown && c.TreeHash.Valid && c.TreeHash.String != currentTree
@@ -585,10 +672,20 @@ func (s *Store) evaluateEvidenceProvenance(t *Task, all []Check, latest map[stri
 	if !highRisk {
 		return
 	}
-	if passes > 0 && runnerPasses == 0 {
+	switch {
+	case passes > 0 && runnerPasses == 0:
 		g.Blockers = append(g.Blockers, fmt.Sprintf(
 			"risk=%s needs a passing check that acline ran, and every passing check was recorded by hand — run: acline check run %d --kind test",
 			t.Risk, t.ID))
+	case passes > 0:
+		// Some check acline ran passed, but at high risk the tests themselves
+		// must have run: a lint or scan pass alone says nothing about behaviour.
+		// (A failing or hand-typed newest test result is reported above.)
+		if c, ok := latest["test"]; !ok || c.Status == "skipped" {
+			g.Blockers = append(g.Blockers, fmt.Sprintf(
+				"risk=%s needs a passing test check that acline ran, and none has run — run: acline check run %d --kind test",
+				t.Risk, t.ID))
+		}
 	}
 	if stale > 0 {
 		g.Blockers = append(g.Blockers, fmt.Sprintf(

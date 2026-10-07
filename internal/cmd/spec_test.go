@@ -23,12 +23,11 @@ func withStdin(t *testing.T, content string) {
 }
 
 func TestSpecAddAndReviseReadBodyFromStdin(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
 	withStdin(t, "line one\nline two\n")
-	specBodyFile = "-"
-	t.Cleanup(func() { specBodyFile = "" })
-	if err := specAddCmd.RunE(specAddCmd, []string{"Stdin", "spec"}); err != nil {
+	if err := c.run("spec", "add", "--body-file", "-", "Stdin", "spec"); err != nil {
 		t.Fatal(err)
 	}
 	specs, _ := st.ListSpecs("", nil)
@@ -37,8 +36,7 @@ func TestSpecAddAndReviseReadBodyFromStdin(t *testing.T) {
 	}
 
 	withStdin(t, "revised body\n")
-	specBodyFile = "-"
-	if err := specReviseCmd.RunE(specReviseCmd, []string{"1"}); err != nil {
+	if err := c.run("spec", "revise", "--body-file", "-", "1"); err != nil {
 		t.Fatal(err)
 	}
 	sp, _ := st.GetSpec(1)
@@ -48,12 +46,11 @@ func TestSpecAddAndReviseReadBodyFromStdin(t *testing.T) {
 }
 
 func TestSpecAddPlainBodyFileStillWorks(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 	f := t.TempDir() + "/body.txt"
 	os.WriteFile(f, []byte("from a file\n"), 0o644)
-	specBodyFile = f
-	t.Cleanup(func() { specBodyFile = "" })
-	if err := specAddCmd.RunE(specAddCmd, []string{"File", "spec"}); err != nil {
+	if err := c.run("spec", "add", "--body-file", f, "File", "spec"); err != nil {
 		t.Fatal(err)
 	}
 	specs, _ := st.ListSpecs("", nil)

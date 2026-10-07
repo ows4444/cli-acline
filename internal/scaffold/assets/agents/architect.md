@@ -12,6 +12,5 @@ read it, and do not exceed it. Start with `acline brief <id>` (or `acline next`)
   (`acline plan propose <spec-id> --file -`). A person approves both.
 - Hand off with `acline task assign <id> <role>`. Never approve your own proposals.
 
-You have no Edit or Write tool. Shell access is held to read-only by the guard only
-when the session runs as this role (`ACLINE_ROLE=architect` or
-`acline session start --role architect`), so do not use Bash to change files.
+You have no Edit or Write tool, and the guard holds your shell to read-only too: it
+knows this agent is `architect` and denies file writes, so do not use Bash to change files.

@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"time"
 
-	"acline/internal/scaffold"
+	"acline/internal/roles"
 )
 
 type Session struct {
@@ -44,15 +44,42 @@ var ErrNoActiveSession = errors.New("no active session")
 // see Store.ResolveRole, which falls back to it when no --role/$ACLINE_ROLE
 // is given on a later command.
 func (s *Store) StartSession(taskID, projectID, roleID *int64, policy string) (int64, error) {
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	id, err := s.insertSession(tx, taskID, projectID, roleID, policy)
+	if err != nil {
+		return 0, err
+	}
+	return id, tx.Commit()
+}
+
+// insertSession writes a session row and its session_started event (attached to
+// the new session, naming its role and policy) in the caller's transaction, so
+// when a policy or role began is in the audit trail.
+func (s *Store) insertSession(tx *sql.Tx, taskID, projectID, roleID *int64, policy string) (int64, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
+	res, err := tx.Exec(
 		`INSERT INTO sessions (task_id, project_id, actor_type, actor_id, model, role_id, policy, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
 		nullInt(taskID), nullInt(projectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), nullInt(roleID), nullStr(policy), now,
 	)
 	if err != nil {
 		return 0, err
 	}
-	return res.LastInsertId()
+	id, err := res.LastInsertId()
+	if err != nil {
+		return 0, err
+	}
+	msg := fmt.Sprintf("session #%d started", id)
+	if policy != "" && policy != "{}" {
+		msg += " with policy " + policy
+	}
+	if _, err := s.logEventTx(tx, taskID, &id, roleID, "session_started", msg); err != nil {
+		return 0, err
+	}
+	return id, nil
 }
 
 const sessionColumns = `id, task_id, project_id, actor_type, actor_id, model, role_id, policy,
@@ -91,14 +118,15 @@ func (s *Store) CurrentSession() (*Session, error) {
 }
 
 // StaleSessions lists active sessions with no activity (their start or their
-// newest event) for longer than idle -- usually a crashed agent. They are not
+// newest event, not counting the session_started record and the chain's
+// one-time hash_version marker) for longer than idle -- usually a crashed agent. They are not
 // ended automatically: ending one lifts its policy and role, which is a
 // person's call (see EndSessionWithToken). `acline doctor` reports them.
 func (s *Store) StaleSessions(idle time.Duration) ([]Session, error) {
 	cutoff := time.Now().Add(-idle).UTC().Format(time.RFC3339)
 	rows, err := s.DB.Query(`SELECT `+sessionColumns+` FROM sessions s
 		WHERE ended_at IS NULL
-		AND MAX(started_at, COALESCE((SELECT MAX(created_at) FROM events e WHERE e.session_id = s.id), '')) < ?
+		AND MAX(started_at, COALESCE((SELECT MAX(created_at) FROM events e WHERE e.session_id = s.id AND e.type NOT IN ('session_started', 'hash_version')), '')) < ?
 		ORDER BY id`, cutoff)
 	if err != nil {
 		return nil, err
@@ -156,13 +184,13 @@ func (s *Store) EndSessionWithToken(summary string, cost SessionCost, token stri
 var ErrAgentCannotLeaveReadOnlyRole = errors.New("an agent cannot end a session running as a read-only role: a person ends it (or the process that launched it)")
 
 // sessionRoleIsReadOnly reports whether sess runs as a built-in role whose
-// contract grants no file writes (see scaffold.RoleIsReadOnly).
+// contract grants no file writes (see roles.ReadOnly).
 func (s *Store) sessionRoleIsReadOnly(sess *Session) bool {
 	if !sess.RoleID.Valid {
 		return false
 	}
 	r, err := s.GetRole(sess.RoleID.Int64)
-	return err == nil && scaffold.RoleIsReadOnly(r.Name)
+	return err == nil && roles.ReadOnly(r.Name)
 }
 
 // EndLaunchedSession ends session id for the process that began it (the
@@ -185,11 +213,25 @@ func (s *Store) EndLaunchedSession(id int64, summary string, cost SessionCost) (
 
 func (s *Store) finishSession(cur *Session, summary string, cost SessionCost) (*Session, error) {
 	now := time.Now().UTC().Format(time.RFC3339)
-	_, err := s.DB.Exec(
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return nil, err
+	}
+	defer tx.Rollback()
+	res, err := tx.Exec(
 		`UPDATE sessions SET ended_at = ?, summary = ?, tokens_in = ?, tokens_out = ?, cost_usd = ? WHERE id = ? AND ended_at IS NULL`,
 		now, summary, cost.TokensIn, cost.TokensOut, cost.CostUSD, cur.ID,
 	)
 	if err != nil {
+		return nil, err
+	}
+	if n, _ := res.RowsAffected(); n > 0 {
+		if _, err := s.logEventTx(tx, nullIntPtr(cur.TaskID), &cur.ID, nullIntPtr(cur.RoleID), "session_ended",
+			fmt.Sprintf("session #%d ended ($%.2f)", cur.ID, cost.CostUSD)); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(); err != nil {
 		return nil, err
 	}
 	cur.EndedAt = sql.NullString{String: now, Valid: true}
@@ -286,15 +328,7 @@ func (s *Store) BeginSession(r SessionStart) (int64, error) {
 			return 0, err
 		}
 	}
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := tx.Exec(
-		`INSERT INTO sessions (task_id, project_id, actor_type, actor_id, model, role_id, policy, started_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		nullInt(r.TaskID), nullInt(projectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), nullInt(r.RoleID), nullStr(policyJSON), now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
+	id, err := s.insertSession(tx, r.TaskID, projectID, r.RoleID, policyJSON)
 	if err != nil {
 		return 0, err
 	}

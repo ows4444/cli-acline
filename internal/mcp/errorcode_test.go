@@ -188,3 +188,53 @@ func TestClassifyErrorProjectAndRoleSentinels(t *testing.T) {
 		}
 	}
 }
+
+func TestErrorCodeAgentCannotRetireMemory(t *testing.T) {
+	cs, st := connectedTestServerWithActor(t, store.Actor{Type: "agent", ID: "claude"})
+	st.Actor = store.Actor{Type: "human", ID: "owner"}
+	id, err := st.AddMemory("", "constraint", "an approved constraint")
+	st.Actor = store.Actor{Type: "agent", ID: "claude"}
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tool := range []string{"acline_memory_forget", "acline_memory_touch"} {
+		r := callToolRaw(t, cs, tool, memoryRetireArgs{ID: id})
+		if !r.IsError {
+			t.Fatalf("%s: an agent retired approved memory", tool)
+		}
+		if got := errorCode(t, r); got != "agent_cannot_retire_memory" {
+			t.Errorf("%s: error_code = %q, want agent_cannot_retire_memory", tool, got)
+		}
+	}
+	if live, _ := st.ListMemory(store.MemoryFilter{}); len(live) != 1 {
+		t.Errorf("the constraint left the live list: %+v", live)
+	}
+}
+
+func TestErrorCodesForHandLoggedAndDanglingReferences(t *testing.T) {
+	cs, _ := connectedTestServer(t)
+	r := callToolRaw(t, cs, "acline_log", logArgs{Message: "x", Type: "approval"})
+	if got := errorCode(t, r); !r.IsError || got != "invalid_log_type" {
+		t.Errorf("logging an approval by hand: error=%v code=%q, want invalid_log_type", r.IsError, got)
+	}
+	missing := int64(999)
+	r = callToolRaw(t, cs, "acline_task_add", taskAddArgs{Title: "t", SpecID: &missing})
+	if got := errorCode(t, r); !r.IsError || got != "not_found" {
+		t.Errorf("a task with a missing spec: error=%v code=%q, want not_found", r.IsError, got)
+	}
+}
+
+func TestCompletingADoneTaskReportsInvalidTransition(t *testing.T) {
+	cs, st := connectedTestServer(t)
+	id, err := st.AddTask("t", "", "normal", store.TaskOpts{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.CompleteTask(id, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	r := callToolRaw(t, cs, "acline_task_done", taskDoneArgs{ID: id})
+	if got := errorCode(t, r); !r.IsError || got != "invalid_transition" {
+		t.Fatalf("completing a done task: error=%v code=%q, want invalid_transition", r.IsError, got)
+	}
+}

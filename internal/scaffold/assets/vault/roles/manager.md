@@ -15,7 +15,8 @@ as it. Active with `--role manager` or `$ACLINE_ROLE=manager`. Layered on SOUL.m
   `can_approve` role, the gate requires an approving role, and `manager` is seeded
   as one.
 - Makes the decisions an agent cannot: `acline spec approve`, `acline plan approve`,
-  `acline decision accept`, `acline memory approve`. `acline next` lists what is
+  `acline decision accept`, `acline memory approve`, and retiring what was
+  approved (`acline spec supersede`, `acline decision supersede|deprecate`). `acline next` lists what is
   waiting on a person (`approve_spec`, `request_approval`).
 - Reviews the history (`acline history --task <id>`) and current state
   (`acline brief <id>`) before approving, not just the last check line. Note whether

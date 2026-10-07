@@ -9,9 +9,9 @@ import (
 	"strconv"
 	"strings"
 	"testing"
-	"time"
 
 	"acline/internal/store"
+	"acline/internal/worktree"
 )
 
 // captureStdout redirects os.Stdout for the duration of fn and returns
@@ -37,23 +37,26 @@ func captureStdout(t *testing.T, fn func()) []byte {
 	return out
 }
 
-// withTestStore points the package-level `st` (normally opened by
-// rootCmd's PersistentPreRunE from --db/$ACLINE_DB) at a fresh temp-file
-// store for the duration of the test, and restores whatever was there
-// before. Commands under test are invoked by calling their RunE directly
-// with package-level flag vars set, rather than through cobra's argument
-// parser — cheap and sufficient for exercising the command logic itself.
-func withTestStore(t *testing.T) *store.Store {
+// newTestCLI is a cli around a fresh temp-file store, with the real terminal,
+// tree hash and guard (a test replaces them on its own cli).
+func newTestCLI(t *testing.T) *cli {
 	t.Helper()
 	s, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
 	if err != nil {
 		t.Fatalf("opening test store: %v", err)
 	}
 	t.Cleanup(func() { s.Close() })
-	prev := st
-	st = s
-	t.Cleanup(func() { st = prev })
-	return s
+	c := newCLI()
+	c.st = s
+	return c
+}
+
+// run runs one acline command line through a fresh command tree around c,
+// with real flag parsing.
+func (c *cli) run(args ...string) error {
+	root := newRootCmd(c)
+	root.SetArgs(args)
+	return root.Execute()
 }
 
 // TestProjectNoteReflectDecisionFlow exercises the capture -> promote ->
@@ -63,16 +66,14 @@ func withTestStore(t *testing.T) *store.Store {
 // verified manually (via the built binary) earlier in development, now as
 // a regression test that doesn't depend on a human re-running it by hand.
 func TestProjectNoteReflectDecisionFlow(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"demo", "/tmp/demo-repo-does-not-need-to-exist"}); err != nil {
+	if err := c.run("project", "add", "demo", "/tmp/demo-repo-does-not-need-to-exist"); err != nil {
 		t.Fatalf("project add: %v", err)
 	}
 
-	noteProject = "demo"
-	noteSource = "manual"
-	t.Cleanup(func() { noteProject, noteSource = "", "manual" })
-	if err := noteAddCmd.RunE(noteAddCmd, []string{"we", "should", "use", "sqlite", "fts5"}); err != nil {
+	if err := c.run("note", "add", "--project", "demo", "we", "should", "use", "sqlite", "fts5"); err != nil {
 		t.Fatalf("note add: %v", err)
 	}
 
@@ -85,12 +86,9 @@ func TestProjectNoteReflectDecisionFlow(t *testing.T) {
 	}
 	noteID := notes[0].ID
 
-	reflectDecisionText = "adopt sqlite fts5"
-	reflectDecisionRationale = "avoids a second index"
-	t.Cleanup(func() { reflectDecisionText, reflectDecisionRationale = "", "" })
-	if err := reflectPromoteCmd.RunE(reflectPromoteCmd, []string{
+	if err := c.run("reflect", "promote", "--decision", "adopt sqlite fts5", "--rationale", "avoids a second index",
 		strconv.FormatInt(noteID, 10), "decision", "Use", "FTS5", "for", "search",
-	}); err != nil {
+	); err != nil {
 		t.Fatalf("reflect promote: %v", err)
 	}
 
@@ -115,7 +113,7 @@ func TestProjectNoteReflectDecisionFlow(t *testing.T) {
 	}
 
 	// Re-promoting the same note must be rejected, not silently duplicated.
-	if err := reflectPromoteCmd.RunE(reflectPromoteCmd, []string{strconv.FormatInt(noteID, 10), "decision", "again"}); err == nil {
+	if err := c.run("reflect", "promote", strconv.FormatInt(noteID, 10), "decision", "again"); err == nil {
 		t.Error("expected promoting an already-promoted note to fail")
 	}
 }
@@ -127,13 +125,10 @@ func TestProjectNoteReflectDecisionFlow(t *testing.T) {
 // a pasted live credential in a decision's rationale or a spec's body
 // would land in the store unredacted.
 func TestDecisionAndSpecAddRedactSecrets(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	decisionRationale = "found leaked key AKIAIOSFODNN7EXAMPLE in the old config"
-	t.Cleanup(func() {
-		decisionScope, decisionContext, decisionText, decisionRationale, decisionProject = "", "", "", "", ""
-	})
-	if err := decisionAddCmd.RunE(decisionAddCmd, []string{"rotate", "creds"}); err != nil {
+	if err := c.run("decision", "add", "--rationale", "found leaked key AKIAIOSFODNN7EXAMPLE in the old config", "rotate", "creds"); err != nil {
 		t.Fatalf("decision add: %v", err)
 	}
 	decisions, err := st.ListDecisions("", nil)
@@ -144,9 +139,7 @@ func TestDecisionAndSpecAddRedactSecrets(t *testing.T) {
 		t.Fatalf("expected decision rationale to be redacted, got %+v", decisions)
 	}
 
-	specBody = "connect via postgres://appuser:hunter2pass@db.internal:5432/prod"
-	t.Cleanup(func() { specBody, specBodyFile, specProject = "", "", "" })
-	if err := specAddCmd.RunE(specAddCmd, []string{"auth", "spec"}); err != nil {
+	if err := c.run("spec", "add", "--body", "connect via postgres://appuser:hunter2pass@db.internal:5432/prod", "auth", "spec"); err != nil {
 		t.Fatalf("spec add: %v", err)
 	}
 	specs, err := st.ListSpecs("", nil)
@@ -158,8 +151,7 @@ func TestDecisionAndSpecAddRedactSecrets(t *testing.T) {
 	}
 	specID := specs[0].ID
 
-	specBody = "rotate this key: AKIAIOSFODNN7EXAMPLE"
-	if err := specReviseCmd.RunE(specReviseCmd, []string{strconv.FormatInt(specID, 10)}); err != nil {
+	if err := c.run("spec", "revise", "--body", "rotate this key: AKIAIOSFODNN7EXAMPLE", strconv.FormatInt(specID, 10)); err != nil {
 		t.Fatalf("spec revise: %v", err)
 	}
 	revised, err := st.GetSpec(specID)
@@ -175,22 +167,20 @@ func TestDecisionAndSpecAddRedactSecrets(t *testing.T) {
 // into another project's --project-scoped view, while an unscoped list
 // still shows everything.
 func TestProjectScopedListsIsolateBetweenProjects(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-a", "/tmp/proj-a"}); err != nil {
+	if err := c.run("project", "add", "proj-a", "/tmp/proj-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-b", "/tmp/proj-b"}); err != nil {
+	if err := c.run("project", "add", "proj-b", "/tmp/proj-b"); err != nil {
 		t.Fatal(err)
 	}
 
-	taskProject = "proj-a"
-	t.Cleanup(func() { taskProject = "" })
-	if err := taskAddCmd.RunE(taskAddCmd, []string{"A-only", "task"}); err != nil {
+	if err := c.run("task", "add", "--project", "proj-a", "A-only", "task"); err != nil {
 		t.Fatal(err)
 	}
-	taskProject = "proj-b"
-	if err := taskAddCmd.RunE(taskAddCmd, []string{"B-only", "task"}); err != nil {
+	if err := c.run("task", "add", "--project", "proj-b", "B-only", "task"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -234,27 +224,22 @@ func TestProjectScopedListsIsolateBetweenProjects(t *testing.T) {
 // must still find it, and the query must actually hit the FTS5 index
 // populated at note-add time.
 func TestSearchCmdIsProjectScoped(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-a", "/tmp/proj-a"}); err != nil {
+	if err := c.run("project", "add", "proj-a", "/tmp/proj-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-b", "/tmp/proj-b"}); err != nil {
+	if err := c.run("project", "add", "proj-b", "/tmp/proj-b"); err != nil {
 		t.Fatal(err)
 	}
 
-	noteProject = "proj-a"
-	noteSource = "manual"
-	t.Cleanup(func() { noteProject, noteSource = "", "manual" })
-	if err := noteAddCmd.RunE(noteAddCmd, []string{"switch", "to", "postgres", "for", "durability"}); err != nil {
+	if err := c.run("note", "add", "--project", "proj-a", "switch", "to", "postgres", "for", "durability"); err != nil {
 		t.Fatalf("note add: %v", err)
 	}
 
-	searchLimit = 20
-	t.Cleanup(func() { searchProject, searchLimit = "", 20 })
-
-	searchProject = "proj-a"
-	projectID, err := resolveProjectFlagOptional(searchProject)
+	searchLimit := 20
+	projectID, err := c.resolveProjectFlagOptional("proj-a")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -266,8 +251,7 @@ func TestSearchCmdIsProjectScoped(t *testing.T) {
 		t.Fatalf("expected 1 note hit scoped to proj-a, got %+v", hits)
 	}
 
-	searchProject = "proj-b"
-	projectID, err = resolveProjectFlagOptional(searchProject)
+	projectID, err = c.resolveProjectFlagOptional("proj-b")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -296,61 +280,43 @@ func TestSearchCmdIsProjectScoped(t *testing.T) {
 // message, since a script parsing --json output shouldn't have to special-case
 // an empty array.
 func TestJSONOutputOnListCommands(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"demo", "/tmp/demo-repo-does-not-need-to-exist"}); err != nil {
+	if err := c.run("project", "add", "demo", "/tmp/demo-repo-does-not-need-to-exist"); err != nil {
 		t.Fatal(err)
 	}
 
-	decisionProject = "demo"
-	decisionContext = "durability"
-	decisionText = "adopt postgres"
-	t.Cleanup(func() { decisionProject, decisionContext, decisionText = "", "", "" })
-	if err := decisionAddCmd.RunE(decisionAddCmd, []string{"use", "postgres"}); err != nil {
+	if err := c.run("decision", "add", "--project", "demo", "--context", "durability", "--decision", "adopt postgres", "use", "postgres"); err != nil {
 		t.Fatalf("decision add: %v", err)
 	}
 
-	memoryProject = "demo"
-	t.Cleanup(func() { memoryProject = "" })
-	if err := memoryAddCmd.RunE(memoryAddCmd, []string{"always", "vacuum", "the", "db"}); err != nil {
+	if err := c.run("memory", "add", "--project", "demo", "always", "vacuum", "the", "db"); err != nil {
 		t.Fatalf("memory add: %v", err)
 	}
 
-	noteProject = "demo"
-	t.Cleanup(func() { noteProject = "" })
-	if err := noteAddCmd.RunE(noteAddCmd, []string{"a", "captured", "note"}); err != nil {
+	if err := c.run("note", "add", "--project", "demo", "a", "captured", "note"); err != nil {
 		t.Fatalf("note add: %v", err)
 	}
 
-	taskProject = "demo"
-	t.Cleanup(func() { taskProject = "" })
-	if err := taskAddCmd.RunE(taskAddCmd, []string{"write", "docs"}); err != nil {
+	if err := c.run("task", "add", "--project", "demo", "write", "docs"); err != nil {
 		t.Fatalf("task add: %v", err)
 	}
 
-	specProject = "demo"
-	t.Cleanup(func() { specProject = "" })
-	if err := specAddCmd.RunE(specAddCmd, []string{"auth", "flow"}); err != nil {
+	if err := c.run("spec", "add", "--project", "demo", "auth", "flow"); err != nil {
 		t.Fatalf("spec add: %v", err)
 	}
 
-	featureProject = "demo"
-	t.Cleanup(func() { featureProject = "" })
-	if err := featureAddCmd.RunE(featureAddCmd, []string{"login"}); err != nil {
+	if err := c.run("feature", "add", "--project", "demo", "login"); err != nil {
 		t.Fatalf("feature add: %v", err)
 	}
 
-	roadmapProject = "demo"
-	t.Cleanup(func() { roadmapProject = "" })
-	if err := roadmapAddCmd.RunE(roadmapAddCmd, []string{"v1", "launch"}); err != nil {
+	if err := c.run("roadmap", "add", "--project", "demo", "v1", "launch"); err != nil {
 		t.Fatalf("roadmap add: %v", err)
 	}
 
 	t.Run("decision list --json", func(t *testing.T) {
-		decisionJSON = true
-		t.Cleanup(func() { decisionJSON = false })
 		out := captureStdout(t, func() {
-			if err := decisionListCmd.RunE(decisionListCmd, nil); err != nil {
+			if err := c.run("decision", "list", "--json"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -370,10 +336,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("memory list --json", func(t *testing.T) {
-		memoryJSON = true
-		t.Cleanup(func() { memoryJSON = false })
 		out := captureStdout(t, func() {
-			if err := memoryListCmd.RunE(memoryListCmd, nil); err != nil {
+			if err := c.run("memory", "list", "--json"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -387,10 +351,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("note list --json", func(t *testing.T) {
-		noteJSON = true
-		t.Cleanup(func() { noteJSON = false })
 		out := captureStdout(t, func() {
-			if err := noteListCmd.RunE(noteListCmd, nil); err != nil {
+			if err := c.run("note", "list", "--json"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -407,11 +369,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("search --json", func(t *testing.T) {
-		searchJSON = true
-		searchLimit = 20
-		t.Cleanup(func() { searchJSON, searchLimit = false, 20 })
 		out := captureStdout(t, func() {
-			if err := searchCmd.RunE(searchCmd, []string{"postgres"}); err != nil {
+			if err := c.run("search", "--json", "postgres"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -425,11 +384,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("search --json with no results prints an empty array", func(t *testing.T) {
-		searchJSON = true
-		searchLimit = 20
-		t.Cleanup(func() { searchJSON, searchLimit = false, 20 })
 		out := captureStdout(t, func() {
-			if err := searchCmd.RunE(searchCmd, []string{"nonexistentxyz"}); err != nil {
+			if err := c.run("search", "--json", "nonexistentxyz"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -443,10 +399,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("task list --json", func(t *testing.T) {
-		listJSON = true
-		t.Cleanup(func() { listJSON = false })
 		out := captureStdout(t, func() {
-			if err := taskListCmd.RunE(taskListCmd, nil); err != nil {
+			if err := c.run("task", "list", "--json"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -466,10 +420,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("spec list --json", func(t *testing.T) {
-		specListJSON = true
-		t.Cleanup(func() { specListJSON = false })
 		out := captureStdout(t, func() {
-			if err := specListCmd.RunE(specListCmd, nil); err != nil {
+			if err := c.run("spec", "list", "--json"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -483,10 +435,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("feature list --json", func(t *testing.T) {
-		featureListJSON = true
-		t.Cleanup(func() { featureListJSON = false })
 		out := captureStdout(t, func() {
-			if err := featureListCmd.RunE(featureListCmd, nil); err != nil {
+			if err := c.run("feature", "list", "--json"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -500,10 +450,8 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 	})
 
 	t.Run("roadmap list --json", func(t *testing.T) {
-		roadmapListJSON = true
-		t.Cleanup(func() { roadmapListJSON = false })
 		out := captureStdout(t, func() {
-			if err := roadmapListCmd.RunE(roadmapListCmd, nil); err != nil {
+			if err := c.run("roadmap", "list", "--json"); err != nil {
 				t.Fatal(err)
 			}
 		})
@@ -524,9 +472,10 @@ func TestJSONOutputOnListCommands(t *testing.T) {
 // project <-> actor not linked" finding: a session started with --project
 // must actually carry that project's id, not just a task link.
 func TestSessionStartRecordsProjectFromFlag(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"demo", "/tmp/demo-repo"}); err != nil {
+	if err := c.run("project", "add", "demo", "/tmp/demo-repo"); err != nil {
 		t.Fatal(err)
 	}
 	p, err := st.GetProjectByName("demo")
@@ -534,9 +483,7 @@ func TestSessionStartRecordsProjectFromFlag(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sessionStartProject = "demo"
-	t.Cleanup(func() { sessionStartProject = "" })
-	if err := sessionStartCmd.RunE(sessionStartCmd, nil); err != nil {
+	if err := c.run("session", "start", "--project", "demo"); err != nil {
 		t.Fatalf("session start: %v", err)
 	}
 
@@ -555,9 +502,10 @@ func TestSessionStartRecordsProjectFromFlag(t *testing.T) {
 // cwd/ACLINE_PROJECT resolution, a session started against a project-scoped
 // task inherits that task's project rather than landing unscoped.
 func TestSessionStartFallsBackToTaskProject(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"demo", "/tmp/demo-repo"}); err != nil {
+	if err := c.run("project", "add", "demo", "/tmp/demo-repo"); err != nil {
 		t.Fatal(err)
 	}
 	p, err := st.GetProjectByName("demo")
@@ -565,9 +513,7 @@ func TestSessionStartFallsBackToTaskProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	taskProject = "demo"
-	t.Cleanup(func() { taskProject = "" })
-	if err := taskAddCmd.RunE(taskAddCmd, []string{"scoped", "task"}); err != nil {
+	if err := c.run("task", "add", "--project", "demo", "scoped", "task"); err != nil {
 		t.Fatal(err)
 	}
 	tasks, err := st.ListTasks(store.TaskFilter{ProjectID: &p.ID})
@@ -578,9 +524,7 @@ func TestSessionStartFallsBackToTaskProject(t *testing.T) {
 		t.Fatalf("expected 1 task under demo, got %+v", tasks)
 	}
 
-	sessionStartTask = strconv.FormatInt(tasks[0].ID, 10)
-	t.Cleanup(func() { sessionStartTask = "" })
-	if err := sessionStartCmd.RunE(sessionStartCmd, nil); err != nil {
+	if err := c.run("session", "start", "--task", strconv.FormatInt(tasks[0].ID, 10)); err != nil {
 		t.Fatalf("session start: %v", err)
 	}
 
@@ -595,12 +539,13 @@ func TestSessionStartFallsBackToTaskProject(t *testing.T) {
 
 // TestSessionListFiltersByProject exercises `session list --project`.
 func TestSessionListFiltersByProject(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-a", "/tmp/proj-a"}); err != nil {
+	if err := c.run("project", "add", "proj-a", "/tmp/proj-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-b", "/tmp/proj-b"}); err != nil {
+	if err := c.run("project", "add", "proj-b", "/tmp/proj-b"); err != nil {
 		t.Fatal(err)
 	}
 	pa, err := st.GetProjectByName("proj-a")
@@ -612,17 +557,14 @@ func TestSessionListFiltersByProject(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	sessionStartProject = "proj-a"
-	t.Cleanup(func() { sessionStartProject = "" })
-	if err := sessionStartCmd.RunE(sessionStartCmd, nil); err != nil {
+	if err := c.run("session", "start", "--project", "proj-a"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.EndSession("", store.SessionCost{}); err != nil {
 		t.Fatal(err)
 	}
 
-	sessionStartProject = "proj-b"
-	if err := sessionStartCmd.RunE(sessionStartCmd, nil); err != nil {
+	if err := c.run("session", "start", "--project", "proj-b"); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := st.EndSession("", store.SessionCost{}); err != nil {
@@ -661,14 +603,13 @@ func TestSessionListFiltersByProject(t *testing.T) {
 // decision) — matching the same bracket-annotation convention `memory
 // list` already uses for its own status/stale markers.
 func TestSearchTextOutputFlagsNonCurrentStatus(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	decisionText, decisionRationale = "adopt widgets", "everyone likes widgets"
-	t.Cleanup(func() { decisionText, decisionRationale = "", "" })
-	if err := decisionAddCmd.RunE(decisionAddCmd, []string{"widgets", "are", "good"}); err != nil {
+	if err := c.run("decision", "add", "--decision", "adopt widgets", "--rationale", "everyone likes widgets", "widgets", "are", "good"); err != nil {
 		t.Fatal(err)
 	}
-	if err := decisionAddCmd.RunE(decisionAddCmd, []string{"widgets", "were", "a", "mistake"}); err != nil {
+	if err := c.run("decision", "add", "--decision", "adopt widgets", "--rationale", "everyone likes widgets", "widgets", "were", "a", "mistake"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -681,17 +622,15 @@ func TestSearchTextOutputFlagsNonCurrentStatus(t *testing.T) {
 	}
 	acceptedID := strconv.FormatInt(decisions[0].ID, 10)
 	rejectedID := strconv.FormatInt(decisions[1].ID, 10)
-	if err := decisionAcceptCmd.RunE(decisionAcceptCmd, []string{acceptedID}); err != nil {
+	if err := c.run("decision", "accept", acceptedID); err != nil {
 		t.Fatal(err)
 	}
-	if err := decisionRejectCmd.RunE(decisionRejectCmd, []string{rejectedID}); err != nil {
+	if err := c.run("decision", "reject", rejectedID); err != nil {
 		t.Fatal(err)
 	}
 
-	searchLimit = 20
-	t.Cleanup(func() { searchLimit = 20 })
 	out := string(captureStdout(t, func() {
-		if err := searchCmd.RunE(searchCmd, []string{"widgets"}); err != nil {
+		if err := c.run("search", "widgets"); err != nil {
 			t.Fatal(err)
 		}
 	}))
@@ -709,12 +648,13 @@ func TestSearchTextOutputFlagsNonCurrentStatus(t *testing.T) {
 // their real RunE, including that dashboard's unverified-deps section
 // picks up the same scoping.
 func TestDepAndEvalCmdsAreProjectScoped(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-a", "/tmp/proj-a"}); err != nil {
+	if err := c.run("project", "add", "proj-a", "/tmp/proj-a"); err != nil {
 		t.Fatal(err)
 	}
-	if err := projectAddCmd.RunE(projectAddCmd, []string{"proj-b", "/tmp/proj-b"}); err != nil {
+	if err := c.run("project", "add", "proj-b", "/tmp/proj-b"); err != nil {
 		t.Fatal(err)
 	}
 	pa, err := st.GetProjectByName("proj-a")
@@ -726,24 +666,17 @@ func TestDepAndEvalCmdsAreProjectScoped(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	depProject = "proj-a"
-	t.Cleanup(func() { depProject = "" })
-	if err := depAddCmd.RunE(depAddCmd, []string{"npm", "left-pad"}); err != nil {
+	if err := c.run("dep", "add", "--project", "proj-a", "npm", "left-pad"); err != nil {
 		t.Fatal(err)
 	}
-	depProject = "proj-b"
-	if err := depAddCmd.RunE(depAddCmd, []string{"npm", "right-pad"}); err != nil {
+	if err := c.run("dep", "add", "--project", "proj-b", "npm", "right-pad"); err != nil {
 		t.Fatal(err)
 	}
 
-	evalProject = "proj-a"
-	evalSuite, evalPassRate = "refactor", 0.9
-	t.Cleanup(func() { evalProject, evalSuite, evalPassRate = "", "", 0 })
-	if err := evalRecordCmd.RunE(evalRecordCmd, nil); err != nil {
+	if err := c.run("eval", "record", "--project", "proj-a", "--suite", "refactor", "--pass-rate", "0.9"); err != nil {
 		t.Fatal(err)
 	}
-	evalProject = "proj-b"
-	if err := evalRecordCmd.RunE(evalRecordCmd, nil); err != nil {
+	if err := c.run("eval", "record", "--project", "proj-b", "--suite", "refactor", "--pass-rate", "0.9"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -785,10 +718,8 @@ func TestDepAndEvalCmdsAreProjectScoped(t *testing.T) {
 	}
 
 	// dashboard's unverified-deps section must pick up the same scoping.
-	dashboardProject = "proj-a"
-	t.Cleanup(func() { dashboardProject = "" })
 	out := string(captureStdout(t, func() {
-		if err := dashboardCmd.RunE(dashboardCmd, nil); err != nil {
+		if err := c.run("dashboard", "--project", "proj-a"); err != nil {
 			t.Fatal(err)
 		}
 	}))
@@ -801,11 +732,9 @@ func TestDepAndEvalCmdsAreProjectScoped(t *testing.T) {
 // default to a note-type history event, easy to mistake for `acline note
 // add`, which is what actually feeds /reflect.
 func TestLogRequiresType(t *testing.T) {
-	withTestStore(t)
-	t.Cleanup(func() { logType, logTask = "", "" })
-
-	logType = ""
-	err := logCmd.RunE(logCmd, []string{"fixed", "the", "bug"})
+	c := newTestCLI(t)
+	st := c.st
+	err := c.run("log", "fixed", "the", "bug")
 	if err == nil || !strings.Contains(err.Error(), "acline note add") {
 		t.Fatalf("expected a missing --type to be refused with a pointer to `acline note add`, got %v", err)
 	}
@@ -813,15 +742,13 @@ func TestLogRequiresType(t *testing.T) {
 	// Internal event types are written only by the command that performs
 	// the action; a direct log must not be able to forge one.
 	for _, internal := range []string{"approval", "override", "guard_denied", "check"} {
-		logType = internal
-		if err := logCmd.RunE(logCmd, []string{"forged"}); err == nil {
+		if err := c.run("log", "--type", internal, "forged"); err == nil {
 			t.Errorf("expected --type %s to be refused", internal)
 		}
 	}
 
-	logType = "bug"
 	captureStdout(t, func() {
-		if err := logCmd.RunE(logCmd, []string{"fixed", "the", "bug"}); err != nil {
+		if err := c.run("log", "--type", "bug", "fixed", "the", "bug"); err != nil {
 			t.Fatalf("log --type bug: %v", err)
 		}
 	})
@@ -840,13 +767,10 @@ func TestLogRequiresType(t *testing.T) {
 // a clear error rather than silently ignored, and omitting --role entirely
 // still creates a task with role_id unset -- exactly today's behavior.
 func TestTaskAddWithRoleAndUnknownRoleIsRefused(t *testing.T) {
-	s := withTestStore(t)
-	t.Cleanup(func() {
-		taskArea, taskType, taskRisk, taskAutonomy, taskSpec, taskMilestone, taskProject, taskRole = "", "", "", "", "", "", "", ""
-	})
+	c := newTestCLI(t)
+	s := c.st
 
-	taskRole = "qa"
-	if err := taskAddCmd.RunE(taskAddCmd, []string{"verify", "the", "build"}); err != nil {
+	if err := c.run("task", "add", "--role", "qa", "verify", "the", "build"); err != nil {
 		t.Fatalf("task add --role qa: %v", err)
 	}
 	tasks, err := s.ListTasks(store.TaskFilter{})
@@ -864,13 +788,11 @@ func TestTaskAddWithRoleAndUnknownRoleIsRefused(t *testing.T) {
 		t.Fatalf("expected role_id %d (qa), got %d", qaRole.ID, tasks[0].RoleID.Int64)
 	}
 
-	taskRole = "not-a-real-role"
-	if err := taskAddCmd.RunE(taskAddCmd, []string{"another", "task"}); err == nil {
+	if err := c.run("task", "add", "--role", "not-a-real-role", "another", "task"); err == nil {
 		t.Fatal("expected an unknown --role to be refused")
 	}
 
-	taskRole = ""
-	if err := taskAddCmd.RunE(taskAddCmd, []string{"unroled", "task"}); err != nil {
+	if err := c.run("task", "add", "unroled", "task"); err != nil {
 		t.Fatalf("task add with no --role: %v", err)
 	}
 	tasks, err = s.ListTasks(store.TaskFilter{})
@@ -886,18 +808,14 @@ func TestTaskAddWithRoleAndUnknownRoleIsRefused(t *testing.T) {
 // layer: a project-scoped role is created, visible alongside the 7 global
 // seeds when scoped to that project, and invisible to a different project.
 func TestRoleAddAndList(t *testing.T) {
-	s := withTestStore(t)
-	t.Cleanup(func() { roleAddKind, roleAddCanApprove, roleAddDescription, roleProject = "both", false, "", "" })
+	c := newTestCLI(t)
+	s := c.st
 
 	if _, err := s.AddProject("demo", "/tmp/demo-role-cmd", "hotl"); err != nil {
 		t.Fatal(err)
 	}
 
-	roleProject = "demo"
-	roleAddKind = "human"
-	roleAddCanApprove = true
-	roleAddDescription = "release manager"
-	if err := roleAddCmd.RunE(roleAddCmd, []string{"release-manager"}); err != nil {
+	if err := c.run("role", "add", "--project", "demo", "--kind", "human", "--can-approve", "--description", "release manager", "release-manager"); err != nil {
 		t.Fatalf("role add: %v", err)
 	}
 
@@ -926,15 +844,15 @@ func TestRoleAddAndList(t *testing.T) {
 // layer: it sets the task's role, logs a role_assigned event with the
 // old->new names, and reassigning again logs the next hop correctly.
 func TestTaskAssignLogsHandoffEvent(t *testing.T) {
-	s := withTestStore(t)
-	t.Cleanup(func() { taskAssignProject = "" })
+	c := newTestCLI(t)
+	s := c.st
 
 	taskID, err := s.AddTask("assign me", "", "normal", store.TaskOpts{})
 	if err != nil {
 		t.Fatal(err)
 	}
 
-	if err := taskAssignCmd.RunE(taskAssignCmd, []string{strconv.FormatInt(taskID, 10), "designer"}); err != nil {
+	if err := c.run("task", "assign", strconv.FormatInt(taskID, 10), "designer"); err != nil {
 		t.Fatalf("task assign designer: %v", err)
 	}
 	task, err := s.GetTask(taskID)
@@ -949,7 +867,7 @@ func TestTaskAssignLogsHandoffEvent(t *testing.T) {
 		t.Fatalf("expected role_id = designer, got %+v", task.RoleID)
 	}
 
-	if err := taskAssignCmd.RunE(taskAssignCmd, []string{strconv.FormatInt(taskID, 10), "developer"}); err != nil {
+	if err := c.run("task", "assign", strconv.FormatInt(taskID, 10), "developer"); err != nil {
 		t.Fatalf("task assign developer: %v", err)
 	}
 	events, err := s.ListEvents(&taskID, 10)
@@ -969,7 +887,7 @@ func TestTaskAssignLogsHandoffEvent(t *testing.T) {
 		t.Fatalf("expected role_assigned messages %v, got %v", want, found)
 	}
 
-	if err := taskAssignCmd.RunE(taskAssignCmd, []string{strconv.FormatInt(taskID, 10), "not-a-role"}); err == nil {
+	if err := c.run("task", "assign", strconv.FormatInt(taskID, 10), "not-a-role"); err == nil {
 		t.Fatal("expected an unknown role name to be refused")
 	}
 }
@@ -977,14 +895,15 @@ func TestTaskAssignLogsHandoffEvent(t *testing.T) {
 // `project use` writes a marker, and a marker outside the project's registered
 // path is ignored, so refusing is better than writing a file that does nothing.
 func TestProjectUseRefusesADirectoryOutsideTheProject(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	root := t.TempDir()
 	if _, err := s.AddProject("demo", root, "hotl"); err != nil {
 		t.Fatal(err)
 	}
 	other := t.TempDir()
 	t.Chdir(other)
-	if err := projectUseCmd.RunE(projectUseCmd, []string{"demo"}); err == nil {
+	if err := c.run("project", "use", "demo"); err == nil {
 		t.Fatal("wrote a marker that would be ignored")
 	}
 	if _, err := os.Stat(filepath.Join(other, ".acline-project")); err == nil {
@@ -994,7 +913,7 @@ func TestProjectUseRefusesADirectoryOutsideTheProject(t *testing.T) {
 	os.MkdirAll(sub, 0o755)
 	t.Chdir(sub)
 	captureStdout(t, func() {
-		if err := projectUseCmd.RunE(projectUseCmd, []string{"demo"}); err != nil {
+		if err := c.run("project", "use", "demo"); err != nil {
 			t.Fatalf("inside the project: %v", err)
 		}
 	})
@@ -1003,7 +922,8 @@ func TestProjectUseRefusesADirectoryOutsideTheProject(t *testing.T) {
 // A passing `check run` is about the code as it was. Once the code changes, a
 // high-risk task must not complete on it.
 func TestCheckRunBindsAPassToTheTreeAndTheGateNoticesWhenItChanges(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	dir := t.TempDir()
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n"), 0o644); err != nil {
 		t.Fatal(err)
@@ -1014,10 +934,8 @@ func TestCheckRunBindsAPassToTheTreeAndTheGateNoticesWhenItChanges(t *testing.T)
 		t.Fatal(err)
 	}
 
-	checkRunKind, checkRunCommand, checkRunTimeout = "test", "true", time.Minute
-	t.Cleanup(func() { checkRunKind, checkRunCommand, checkRunTimeout = "", "", 0 })
 	captureStdout(t, func() {
-		if err := checkRunCmd.RunE(checkRunCmd, []string{strconv.FormatInt(id, 10)}); err != nil {
+		if err := c.run("check", "run", "--kind", "test", "--cmd", "true", strconv.FormatInt(id, 10)); err != nil {
 			t.Fatal(err)
 		}
 	})
@@ -1025,7 +943,7 @@ func TestCheckRunBindsAPassToTheTreeAndTheGateNoticesWhenItChanges(t *testing.T)
 	if len(checks) != 1 || checks[0].Source != store.CheckSourceRunner || checks[0].Status != "pass" {
 		t.Fatalf("check = %+v", checks)
 	}
-	if want := currentTree(); want == "" || checks[0].TreeHash.String != want {
+	if want := c.currentTree(); want == "" || checks[0].TreeHash.String != want {
 		t.Fatalf("recorded tree %q, working tree is %q", checks[0].TreeHash.String, want)
 	}
 	if _, err := s.AddApproval(id, "code_review", "bob", "approved", ""); err != nil {
@@ -1033,7 +951,7 @@ func TestCheckRunBindsAPassToTheTreeAndTheGateNoticesWhenItChanges(t *testing.T)
 	}
 
 	// unchanged code: the gate is satisfied
-	out := captureStdout(t, func() { taskGateCmd.RunE(taskGateCmd, []string{strconv.FormatInt(id, 10)}) })
+	out := captureStdout(t, func() { c.run("task", "gate", strconv.FormatInt(id, 10)) })
 	if !strings.Contains(string(out), "gate satisfied") {
 		t.Fatalf("gate output: %s", out)
 	}
@@ -1042,17 +960,17 @@ func TestCheckRunBindsAPassToTheTreeAndTheGateNoticesWhenItChanges(t *testing.T)
 	if err := os.WriteFile(filepath.Join(dir, "main.go"), []byte("package main\n// changed after the check ran\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	out = captureStdout(t, func() { taskGateCmd.RunE(taskGateCmd, []string{strconv.FormatInt(id, 10)}) })
+	out = captureStdout(t, func() { c.run("task", "gate", strconv.FormatInt(id, 10)) })
 	if !strings.Contains(string(out), "NOT satisfied") || !strings.Contains(string(out), "code has changed") {
 		t.Fatalf("stale evidence went unnoticed: %s", out)
 	}
-	if err := taskDoneCmd.RunE(taskDoneCmd, []string{strconv.FormatInt(id, 10)}); err == nil {
+	if err := c.run("task", "done", strconv.FormatInt(id, 10)); err == nil {
 		t.Fatal("task done completed on evidence about older code")
 	}
 
 	// re-running against the new code fixes it
-	captureStdout(t, func() { checkRunCmd.RunE(checkRunCmd, []string{strconv.FormatInt(id, 10)}) })
-	if err := taskDoneCmd.RunE(taskDoneCmd, []string{strconv.FormatInt(id, 10)}); err != nil {
+	captureStdout(t, func() { c.run("check", "run", "--kind", "test", "--cmd", "true", strconv.FormatInt(id, 10)) })
+	if err := c.run("task", "done", strconv.FormatInt(id, 10)); err != nil {
 		t.Fatalf("after re-running: %v", err)
 	}
 }
@@ -1060,16 +978,15 @@ func TestCheckRunBindsAPassToTheTreeAndTheGateNoticesWhenItChanges(t *testing.T)
 // `check run --cmd true` used to record a runner pass for any agent, which made
 // "high risk needs a check acline ran" meaningless. The command must not even run.
 func TestAgentCheckRunWithCmdIsRefusedBeforeItRuns(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	s.Actor = store.Actor{Type: "agent", ID: "claude-code"}
 	dir := t.TempDir()
 	t.Chdir(dir)
 	id, _ := s.AddTask("risky", "", "normal", store.TaskOpts{Risk: "high"})
 
 	marker := filepath.Join(dir, "ran")
-	checkRunKind, checkRunCommand, checkRunTimeout = "test", "touch "+marker, time.Minute
-	t.Cleanup(func() { checkRunKind, checkRunCommand, checkRunTimeout = "", "", 0 })
-	err := checkRunCmd.RunE(checkRunCmd, []string{strconv.FormatInt(id, 10)})
+	err := c.run("check", "run", "--kind", "test", "--cmd", "touch "+marker, strconv.FormatInt(id, 10))
 	if !errors.Is(err, store.ErrAgentCannotChooseCheckCommand) {
 		t.Fatalf("agent check run --cmd = %v, want ErrAgentCannotChooseCheckCommand", err)
 	}
@@ -1082,27 +999,27 @@ func TestAgentCheckRunWithCmdIsRefusedBeforeItRuns(t *testing.T) {
 }
 
 func TestCheckRecordIsManualAndRecordsTheTree(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	dir := t.TempDir()
 	os.WriteFile(filepath.Join(dir, "a.txt"), []byte("x"), 0o644)
 	t.Chdir(dir)
 	id, _ := s.AddTask("t", "", "normal", store.TaskOpts{})
-	checkKind, checkStatus, checkDetail = "lint", "pass", "by hand"
-	t.Cleanup(func() { checkKind, checkStatus, checkDetail = "", "", "" })
 	captureStdout(t, func() {
-		if err := checkRecordCmd.RunE(checkRecordCmd, []string{strconv.FormatInt(id, 10)}); err != nil {
+		if err := c.run("check", "record", "--kind", "lint", "--status", "pass", "--detail", "by hand", strconv.FormatInt(id, 10)); err != nil {
 			t.Fatal(err)
 		}
 	})
 	checks, _ := s.ListChecks(id)
-	if len(checks) != 1 || checks[0].Source != store.CheckSourceManual || checks[0].TreeHash.String != currentTree() {
+	if len(checks) != 1 || checks[0].Source != store.CheckSourceManual || checks[0].TreeHash.String != c.currentTree() {
 		t.Fatalf("check = %+v", checks)
 	}
 }
 
 // A tree that cannot be fingerprinted used to read as "nothing changed".
 func TestHighRiskGateBlocksWhenTheTreeCannotBeFingerprinted(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	dir := t.TempDir()
 	t.Chdir(dir)
 	id, _ := s.AddTask("risky", "", "normal", store.TaskOpts{Risk: "high"})
@@ -1113,15 +1030,134 @@ func TestHighRiskGateBlocksWhenTheTreeCannotBeFingerprinted(t *testing.T) {
 	if _, err := s.AddApproval(id, "code_review", "bob", "approved", ""); err != nil {
 		t.Fatal(err)
 	}
-	prev := hashTree
-	hashTree = func(string) string { return "" }
-	t.Cleanup(func() { hashTree = prev })
+	c.hashTree = func(string) string { return "" }
 
-	out := captureStdout(t, func() { taskGateCmd.RunE(taskGateCmd, []string{strconv.FormatInt(id, 10)}) })
+	out := captureStdout(t, func() { c.run("task", "gate", strconv.FormatInt(id, 10)) })
 	if !strings.Contains(string(out), "NOT satisfied") || !strings.Contains(string(out), "could not be fingerprinted") {
 		t.Fatalf("gate output: %s", out)
 	}
-	if err := taskDoneCmd.RunE(taskDoneCmd, []string{strconv.FormatInt(id, 10)}); err == nil {
+	if err := c.run("task", "done", strconv.FormatInt(id, 10)); err == nil {
 		t.Fatal("task done completed although the tree could not be checked")
+	}
+}
+
+// `check run` and `task done` used the current directory for both the run and
+// the tree fingerprint, so from a subfolder only that subfolder's tests ran and
+// only its files were fingerprinted: a high-risk task completed while tests
+// elsewhere failed, and a change outside the subfolder went unnoticed. They now
+// use the task's registered project path, as the MCP tools do.
+func TestCheckRunAndGateUseTheProjectRootFromASubfolder(t *testing.T) {
+	c := newTestCLI(t)
+	s := c.st
+	root := t.TempDir()
+	for _, d := range []string{"a", "b"} {
+		if err := os.MkdirAll(filepath.Join(root, d), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(filepath.Join(root, d, "x.go"), []byte("package "+d+"\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	pid, err := s.AddProject("demo", root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, err := s.AddTask("risky", "", "normal", store.TaskOpts{Risk: "high", ProjectID: &pid})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Chdir(filepath.Join(root, "b"))
+
+	captureStdout(t, func() {
+		if err := c.run("check", "run", "--kind", "test", "--cmd", "pwd", strconv.FormatInt(id, 10)); err != nil {
+			t.Fatal(err)
+		}
+	})
+	checks, _ := s.ListChecks(id)
+	if len(checks) != 1 || checks[0].Status != "pass" {
+		t.Fatalf("check = %+v", checks)
+	}
+	lines := strings.Split(strings.TrimSpace(checks[0].Detail.String), "\n")
+	if ranIn := store.RealPath(lines[len(lines)-1]); ranIn != store.RealPath(root) {
+		t.Errorf("the check ran in %s, want the project root %s", ranIn, store.RealPath(root))
+	}
+	if rootTree := worktree.Hash(root); checks[0].TreeHash.String != rootTree {
+		t.Fatalf("recorded tree %q, the project root's is %q (the subfolder's is %q)",
+			checks[0].TreeHash.String, rootTree, worktree.Hash(filepath.Join(root, "b")))
+	}
+	if _, err := s.AddApproval(id, "code_review", "bob", "approved", ""); err != nil {
+		t.Fatal(err)
+	}
+
+	// A change outside the subfolder makes the pass stale, seen from the subfolder too.
+	if err := os.WriteFile(filepath.Join(root, "a", "x.go"), []byte("package a\n\nvar changed = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err = c.run("task", "done", strconv.FormatInt(id, 10))
+	if err == nil || !strings.Contains(err.Error(), "changed since") {
+		t.Fatalf("task done from a subfolder after a change elsewhere = %v, want the stale-check blocker", err)
+	}
+}
+
+// `acline approve` records the code it approved, so the gate can ask for a new
+// approval after the code changes.
+func TestApproveRecordsTheTreeAndTheGateWantsANewOneAfterAChange(t *testing.T) {
+	c := newTestCLI(t)
+	s := c.st
+	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "x.go"), []byte("package x\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	pid, err := s.AddProject("demo", root, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id, _ := s.AddTask("risky", "", "normal", store.TaskOpts{Risk: "high", ProjectID: &pid})
+	t.Chdir(root)
+	idArg := strconv.FormatInt(id, 10)
+	captureStdout(t, func() {
+		if err := c.run("approve", idArg); err != nil {
+			t.Fatal(err)
+		}
+	})
+	approvals, _ := s.ListApprovals(id)
+	if len(approvals) != 1 || approvals[0].TreeHash.String != worktree.Hash(root) {
+		t.Fatalf("approval = %+v, want the project's tree %q", approvals, worktree.Hash(root))
+	}
+	if err := os.WriteFile(filepath.Join(root, "x.go"), []byte("package x\n\nvar y = 1\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := s.EvaluateGateForTree(id, c.taskGateTree(id))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(strings.Join(g.Blockers, "\n"), "different version of the code") {
+		t.Fatalf("after a change the old approval still counted: %+v", g)
+	}
+}
+
+// `task add` sent its flag defaults (risk low, autonomy hotl) as if typed, so
+// a project's defaults never applied. Only typed flags are sent now.
+func TestTaskAddUsesTheProjectsDefaultsUnlessFlagsAreTyped(t *testing.T) {
+	c := newTestCLI(t)
+	s := c.st
+	pid, err := s.AddProjectWithDefaults("strict", "", "hitl", "medium", "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	add := func(title string, flags ...string) *store.Task {
+		captureStdout(t, func() {
+			if err := c.run(append(append([]string{"task", "add", "--project", "strict"}, flags...), title)...); err != nil {
+				t.Fatal(err)
+			}
+		})
+		tasks, _ := s.ListTasks(store.TaskFilter{ProjectID: &pid})
+		return &tasks[len(tasks)-1]
+	}
+	if got := add("defaults"); got.Risk != "medium" || got.Autonomy != "hitl" {
+		t.Fatalf("no flags: %s/%s, want the project's medium/hitl", got.Risk, got.Autonomy)
+	}
+	if got := add("typed", "--risk", "low", "--autonomy", "hotl"); got.Risk != "low" || got.Autonomy != "hotl" {
+		t.Fatalf("typed flags: %s/%s, want low/hotl", got.Risk, got.Autonomy)
 	}
 }

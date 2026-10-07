@@ -20,26 +20,30 @@ import (
 	"acline/internal/store"
 )
 
-var doctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check the store, the audit trail, the approval token and this project's guard hooks (read-only)",
-	Long: "Reports what is healthy, what deserves attention and what is broken: the store file and its permissions, SQLite's own\n" +
-		"integrity check, the audit hash chain and the seals on approvals and checks, whether an approval token is enabled,\n" +
-		"backups left by migrations, whether this directory's Claude Code settings run the guard on every tool it checks,\n" +
-		"which project this directory belongs to, and whether the `claude` binary the orchestrator needs is installed.\n" +
-		"It changes nothing. Exit status is non-zero only when something is broken ([fail]); [warn] lines are advice.",
-	Args: cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		if fails := runDoctor(cmd.OutOrStdout()); fails > 0 {
-			return fmt.Errorf("%d check(s) failed", fails)
-		}
-		return nil
-	},
+func newDoctorCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Check the store, the audit trail, the approval token and this project's guard hooks (read-only)",
+		Long: "Reports what is healthy, what deserves attention and what is broken: the store file and its permissions, SQLite's own\n" +
+			"integrity check, the audit hash chain and the seals on approvals and checks, whether an approval token is enabled,\n" +
+			"backups left by migrations, whether this directory's Claude Code settings run the guard on every tool it checks,\n" +
+			"which project this directory belongs to, and whether the `claude` binary the orchestrator needs is installed.\n" +
+			"It changes nothing. Exit status is non-zero only when something is broken ([fail]); [warn] lines are advice.",
+		Args: cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			if fails := runDoctor(cmd.OutOrStdout(), c.st); fails > 0 {
+				return fmt.Errorf("%d check(s) failed", fails)
+			}
+			return nil
+		},
+	}
+	return cmd
 }
 
 // doctorReport prints check results and counts the failures.
 type doctorReport struct {
 	w     io.Writer
+	st    *store.Store
 	fails int
 }
 
@@ -58,9 +62,9 @@ func (r *doctorReport) fail(name, format string, a ...any) {
 // mentioning: a WAL that never checkpoints usually means a reader is stuck open.
 const walWarnBytes = 64 << 20
 
-// runDoctor writes the report to w and returns how many checks failed.
-func runDoctor(w io.Writer) int {
-	r := &doctorReport{w: w}
+// runDoctor writes the report on s to w and returns how many checks failed.
+func runDoctor(w io.Writer, s *store.Store) int {
+	r := &doctorReport{w: w, st: s}
 	doctorStore(r)
 	doctorAudit(r)
 	doctorAuthority(r)
@@ -74,27 +78,27 @@ func runDoctor(w io.Writer) int {
 }
 
 func doctorStore(r *doctorReport) {
-	info, err := os.Stat(st.Path)
+	info, err := os.Stat(r.st.Path)
 	if err != nil {
-		r.fail("store", "cannot stat %s: %v", st.Path, err)
+		r.fail("store", "cannot stat %s: %v", r.st.Path, err)
 		return
 	}
-	r.ok("store", "%s (%s, schema %d)", st.Path, humanBytes(info.Size()), store.SchemaVersion())
+	r.ok("store", "%s (%s, schema %d)", r.st.Path, humanBytes(info.Size()), store.SchemaVersion())
 	if info.Mode().Perm()&0o077 != 0 {
-		r.warn("store perms", "%s is readable by other users (mode %v); it holds specs, decisions and the audit trail: chmod 600", st.Path, info.Mode().Perm())
+		r.warn("store perms", "%s is readable by other users (mode %v); it holds specs, decisions and the audit trail: chmod 600", r.st.Path, info.Mode().Perm())
 	}
-	if wal, err := os.Stat(st.Path + "-wal"); err == nil && wal.Size() > walWarnBytes {
+	if wal, err := os.Stat(r.st.Path + "-wal"); err == nil && wal.Size() > walWarnBytes {
 		r.warn("wal", "write-ahead log is %s: a long-lived reader may be blocking checkpoints", humanBytes(wal.Size()))
 	}
 	var result string
-	if err := st.DB.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
+	if err := r.st.DB.QueryRow(`PRAGMA integrity_check`).Scan(&result); err != nil {
 		r.fail("integrity", "PRAGMA integrity_check: %v", err)
 	} else if result != "ok" {
 		r.fail("integrity", "SQLite reports: %s", result)
 	} else {
 		r.ok("integrity", "SQLite integrity_check ok")
 	}
-	backups, _ := filepath.Glob(st.Path + ".pre-v*")
+	backups, _ := filepath.Glob(r.st.Path + ".pre-v*")
 	sort.Strings(backups)
 	if len(backups) > 0 {
 		names := make([]string, len(backups))
@@ -106,7 +110,7 @@ func doctorStore(r *doctorReport) {
 }
 
 func doctorAudit(r *doctorReport) {
-	chain, err := st.VerifyChain()
+	chain, err := r.st.VerifyChain()
 	switch {
 	case err != nil:
 		r.fail("audit trail", "%v", err)
@@ -117,7 +121,7 @@ func doctorAudit(r *doctorReport) {
 	default:
 		r.ok("audit trail", "%d event(s), hash chain intact", chain.Checked)
 	}
-	rec, err := st.VerifyRecords()
+	rec, err := r.st.VerifyRecords()
 	switch {
 	case err != nil:
 		r.fail("seals", "%v", err)
@@ -132,7 +136,7 @@ func doctorAudit(r *doctorReport) {
 }
 
 func doctorAuthority(r *doctorReport) {
-	on, err := st.ApprovalTokenEnabled()
+	on, err := r.st.ApprovalTokenEnabled()
 	switch {
 	case err != nil:
 		r.fail("approval token", "%v", err)
@@ -141,11 +145,11 @@ func doctorAuthority(r *doctorReport) {
 	default:
 		r.warn("approval token", "not enabled, so identity is self-declared and anything that sets ACLINE_ACTOR_TYPE=human can approve work — run `acline auth init` in a terminal")
 	}
-	r.ok("acting as", "%s/%s", st.Actor.Type, st.Actor.ID)
+	r.ok("acting as", "%s/%s", r.st.Actor.Type, r.st.Actor.ID)
 }
 
 func doctorProject(r *doctorReport) {
-	projects, err := st.ListProjects()
+	projects, err := r.st.ListProjects()
 	if err != nil {
 		r.fail("project", "%v", err)
 		return
@@ -157,7 +161,7 @@ func doctorProject(r *doctorReport) {
 			r.fail("project root", "project %q is registered at %s, which is the filesystem root or contains your home directory, so the guard lets agents write almost anywhere — re-register it at the repository's own path", pr.Name, pr.Path.String)
 		}
 	}
-	p, err := st.ResolveCurrentProject()
+	p, err := r.st.ResolveCurrentProject()
 	switch {
 	case err == nil:
 		r.ok("project", "this directory belongs to %q", p.Name)
@@ -178,7 +182,7 @@ const staleSessionAge = 12 * time.Hour
 // time (usually a crashed agent). They are not ended here: ending one lifts its
 // policy and role, which a person decides.
 func doctorSessions(r *doctorReport) {
-	stale, err := st.StaleSessions(staleSessionAge)
+	stale, err := r.st.StaleSessions(staleSessionAge)
 	if err != nil {
 		r.warn("sessions", "%v", err)
 		return
@@ -207,9 +211,9 @@ func doctorRunners(r *doctorReport) {
 		return
 	}
 	var configured map[string]bool
-	if p, err := st.ResolveCurrentProject(); err == nil {
+	if p, err := r.st.ResolveCurrentProject(); err == nil {
 		configured = map[string]bool{}
-		if runners, err := st.ListCheckRunners(p.ID); err == nil {
+		if runners, err := r.st.ListCheckRunners(p.ID); err == nil {
 			for _, rn := range runners {
 				configured[rn.Kind] = true
 			}
@@ -276,8 +280,4 @@ func humanBytes(n int64) string {
 		return fmt.Sprintf("%.1f KB", float64(n)/(1<<10))
 	}
 	return fmt.Sprintf("%d B", n)
-}
-
-func init() {
-	rootCmd.AddCommand(doctorCmd)
 }

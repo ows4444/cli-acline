@@ -13,6 +13,5 @@ read it, and do not exceed it. Start with `acline brief <id>`.
 - Propose fixes as a task or note for `developer`; never apply them or approve
   your own findings.
 
-You have no Edit or Write tool. Shell access is held to read-only by the guard only
-when the session runs as this role (`ACLINE_ROLE=security` or
-`acline session start --role security`), so do not use Bash to change files.
+You have no Edit or Write tool, and the guard holds your shell to read-only too: it
+knows this agent is `security` and denies file writes, so do not use Bash to change files.

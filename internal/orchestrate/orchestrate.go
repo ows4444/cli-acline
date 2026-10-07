@@ -26,6 +26,7 @@ import (
 	"strings"
 	"time"
 
+	"acline/internal/app"
 	"acline/internal/brief"
 	"acline/internal/store"
 )
@@ -72,7 +73,11 @@ type Options struct {
 	StopFile      string   // if this file exists, stop before the next launch
 	DryRun        bool     // do everything except begin a session and launch
 	NoSandbox     bool     // launch without the Bash sandbox (see sandboxSettings); a person's explicit choice
-	Log           func(format string, args ...any)
+	// GuardTools, when set, are the tools the guard hook must cover in the
+	// directory the agent runs in (PreflightHooks), checked once that directory
+	// is known: the task's project, which need not be where the launch started.
+	GuardTools []string
+	Log        func(format string, args ...any)
 }
 
 // launch is what every kind of step (task step, plan, spec, research) needs to
@@ -406,6 +411,40 @@ func Step(ctx context.Context, st *store.Store, agent Agent, opts Options) (Step
 	if st.Actor.Type != "agent" {
 		return StepReport{}, errors.New("orchestrator must run with an agent actor")
 	}
+	route, task, rep, err := chooseStep(st, opts)
+	if err != nil || rep.Stop != StopNone {
+		return rep, err
+	}
+	req, err := prepareLaunch(st, route, task, &opts, rep.Role)
+	if err != nil {
+		return rep, err
+	}
+	if len(opts.GuardTools) > 0 && !opts.DryRun {
+		if err := PreflightHooks(opts.Dir, opts.GuardTools); err != nil {
+			return rep, err
+		}
+	}
+	if opts.DryRun {
+		rep.Stop, rep.Detail = StopDryRun, "not launched"
+		if c, ok := agent.(ClaudeAgent); ok {
+			rep.Command = append([]string{c.bin()}, c.Args(req)...)
+		}
+		return rep, nil
+	}
+	sessionID, err := st.BeginSession(stepSession(route, task))
+	if errors.Is(err, store.ErrSessionActive) {
+		rep.Stop, rep.Detail = StopSessionActive, "a session is already active; end it first"
+		return rep, nil
+	}
+	if err != nil {
+		return rep, err
+	}
+	return runStep(ctx, st, agent, req, route, task, sessionID, opts, rep)
+}
+
+// chooseStep picks the task (opts.TaskID, or the best launchable one) and
+// checks it may be launched. A report with Stop set means it may not, and why.
+func chooseStep(st *store.Store, opts Options) (*store.Route, *store.Task, StepReport, error) {
 	var route *store.Route
 	var err error
 	if opts.TaskID != nil {
@@ -414,10 +453,10 @@ func Step(ctx context.Context, st *store.Store, agent Agent, opts Options) (Step
 		route, err = pick(st, opts.ProjectID)
 	}
 	if err != nil {
-		return StepReport{}, err
+		return nil, nil, StepReport{}, err
 	}
 	if route == nil {
-		return StepReport{Stop: StopNothing, Detail: "no open tasks"}, nil
+		return nil, nil, StepReport{Stop: StopNothing, Detail: "no open tasks"}, nil
 	}
 	rep := StepReport{TaskID: route.TaskID, Action: route.Action, After: route.Action}
 	if route.Role != nil {
@@ -425,47 +464,52 @@ func Step(ctx context.Context, st *store.Store, agent Agent, opts Options) (Step
 	}
 	task, err := st.GetTask(route.TaskID)
 	if err != nil {
-		return rep, err
+		return nil, nil, rep, err
 	}
 	if stop, why := Eligible(task, route); stop != StopNone {
 		rep.Stop, rep.Detail = stop, why
-		return rep, nil
+		return route, task, rep, nil
 	}
 	if opts.StopFile != "" {
 		if _, err := os.Stat(opts.StopFile); err == nil {
 			rep.Stop, rep.Detail = StopKilled, "stop file present: "+opts.StopFile
-			return rep, nil
+			return route, task, rep, nil
 		}
 	}
 	if _, err := st.CurrentSession(); err == nil {
 		rep.Stop, rep.Detail = StopSessionActive, "a session is already active; end it first"
-		return rep, nil
 	}
+	return route, task, rep, nil
+}
 
+// prepareLaunch builds the agent's request: its brief, the task's project
+// directory (set on opts) and the tools the step's action allows.
+func prepareLaunch(st *store.Store, route *store.Route, task *store.Task, opts *Options, role string) (AgentRequest, error) {
 	b, err := brief.Build(st, route.TaskID)
 	if err != nil {
-		return rep, err
+		return AgentRequest{}, err
+	}
+	// The agent works in the task's own project, not wherever the orchestrator
+	// was started: a task of project B launched from A's folder must not edit A.
+	if dir := app.ProjectDir(st, route.TaskID); dir != "" {
+		opts.Dir = dir
 	}
 	extra := opts.ExtraAllow
 	if route.Action != store.RouteDefineCriteria && task.ProjectID.Valid {
 		runners, err := st.ListCheckRunners(task.ProjectID.Int64)
 		if err != nil {
-			return rep, err
+			return AgentRequest{}, err
 		}
 		extra = append(RunnerTools(runners), extra...)
 	}
 	allow, deny := Tools(route.Action, extra)
-	req := launch{Dir: opts.Dir, PassEnv: opts.PassEnv, NoSandbox: opts.NoSandbox, StepBudgetUSD: opts.StepBudgetUSD, StepTimeout: opts.StepTimeout}.request(st.Path, rep.Role, b.Markdown(), allow, deny)
-	if opts.DryRun {
-		rep.Stop, rep.Detail = StopDryRun, "not launched"
-		if c, ok := agent.(ClaudeAgent); ok {
-			rep.Command = append([]string{c.bin()}, c.Args(req)...)
-		}
-		return rep, nil
-	}
+	return launch{Dir: opts.Dir, PassEnv: opts.PassEnv, NoSandbox: opts.NoSandbox, StepBudgetUSD: opts.StepBudgetUSD, StepTimeout: opts.StepTimeout}.request(st.Path, role, b.Markdown(), allow, deny), nil
+}
 
-	// define_criteria writes criteria, not code: link the session to no task so
-	// starting it does not move the task to in_progress and change its route.
+// stepSession is the session a step runs in. define_criteria writes criteria,
+// not code: it links the session to no task, so starting it does not move the
+// task to in_progress and change its route.
+func stepSession(route *store.Route, task *store.Task) store.SessionStart {
 	start := store.SessionStart{ProjectID: nil, Policy: store.Policy{Label: fmt.Sprintf("orchestrator: %s task #%d", route.Action, route.TaskID)}}
 	if route.Action != store.RouteDefineCriteria {
 		start.TaskID = &route.TaskID
@@ -476,14 +520,13 @@ func Step(ctx context.Context, st *store.Store, agent Agent, opts Options) (Step
 	if route.Role != nil {
 		start.RoleID = &route.Role.ID
 	}
-	sessionID, err := st.BeginSession(start)
-	if errors.Is(err, store.ErrSessionActive) {
-		rep.Stop, rep.Detail = StopSessionActive, "a session is already active; end it first"
-		return rep, nil
-	}
-	if err != nil {
-		return rep, err
-	}
+	return start
+}
+
+// runStep runs the agent in session sessionID, ends the session, and judges
+// the step: what changed, and whether to stop.
+func runStep(ctx context.Context, st *store.Store, agent Agent, req AgentRequest, route *store.Route, task *store.Task,
+	sessionID int64, opts Options, rep StepReport) (StepReport, error) {
 	taskID := route.TaskID
 	logDispatch := func(msg string) {
 		_, _ = st.LogEvent(&taskID, &sessionID, stopEventType, msg)
@@ -520,19 +563,7 @@ func Step(ctx context.Context, st *store.Store, agent Agent, opts Options) (Step
 		return rep, err
 	}
 	rep.After = after.Action
-
-	switch {
-	case ctx.Err() != nil:
-		rep.Stop, rep.Detail = StopKilled, "interrupted"
-	case res.StartErr != nil:
-		rep.Stop, rep.Detail = StopAgentFailed, res.StartErr.Error()
-	case rep.Violations > 0:
-		rep.Stop, rep.Detail = StopViolation, fmt.Sprintf("%d policy/guard denial(s) recorded during the step", rep.Violations)
-	case res.TimedOut || res.ExitCode != 0:
-		rep.Stop, rep.Detail = StopAgentFailed, fmt.Sprintf("agent exited %d (timed out: %t)", res.ExitCode, res.TimedOut)
-	case signature(after) == signature(baseline) && !rep.FilesEdited:
-		rep.Stop, rep.Detail = StopNoProgress, "neither the recorded state nor any file changed"
-	}
+	rep.Stop, rep.Detail = judgeStep(ctx, res, rep, signature(after) == signature(baseline))
 	if rep.Stop == StopAgentFailed || rep.Stop == StopNoProgress || rep.Stop == StopViolation {
 		// A note, not a memory: it waits for `reflect` and a person, and is not trusted context.
 		note := fmt.Sprintf("orchestrator stopped on task #%d (%s): %s", taskID, route.Action, rep.Detail)
@@ -541,6 +572,24 @@ func Step(ctx context.Context, st *store.Store, agent Agent, opts Options) (Step
 		}
 	}
 	return rep, nil
+}
+
+// judgeStep says whether a finished step should stop the run, and why.
+// unchanged is whether the task's route reads the same as before the step.
+func judgeStep(ctx context.Context, res AgentResult, rep StepReport, unchanged bool) (Stop, string) {
+	switch {
+	case ctx.Err() != nil:
+		return StopKilled, "interrupted"
+	case res.StartErr != nil:
+		return StopAgentFailed, res.StartErr.Error()
+	case rep.Violations > 0:
+		return StopViolation, fmt.Sprintf("%d policy/guard denial(s) recorded during the step", rep.Violations)
+	case res.TimedOut || res.ExitCode != 0:
+		return StopAgentFailed, fmt.Sprintf("agent exited %d (timed out: %t)", res.ExitCode, res.TimedOut)
+	case unchanged && !rep.FilesEdited:
+		return StopNoProgress, "neither the recorded state nor any file changed"
+	}
+	return StopNone, ""
 }
 
 func deniedSuffix(denied []string) string {

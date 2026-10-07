@@ -77,14 +77,19 @@ func (s *Store) EnableApprovalToken() (string, error) {
 		return "", err
 	}
 	// INSERT OR IGNORE + a re-check guards two racing enables: only one wins.
-	res, err := s.DB.Exec(`INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)`, metaApprovalTokenHash, hashToken(token))
+	err = s.writeWithEvent(nil, "approval_token", func(tx *sql.Tx) (string, error) {
+		res, err := tx.Exec(`INSERT OR IGNORE INTO meta (key, value) VALUES (?, ?)`, metaApprovalTokenHash, hashToken(token))
+		if err != nil {
+			return "", err
+		}
+		if n, _ := res.RowsAffected(); n == 0 {
+			return "", ErrApprovalTokenAlreadyEnabled
+		}
+		return "approval token enabled", nil
+	})
 	if err != nil {
 		return "", err
 	}
-	if n, _ := res.RowsAffected(); n == 0 {
-		return "", ErrApprovalTokenAlreadyEnabled
-	}
-	s.LogEventGlobal("approval_token", "approval token enabled")
 	return token, nil
 }
 
@@ -146,10 +151,12 @@ func (s *Store) RotateApprovalToken(current string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	if _, err := s.DB.Exec(`UPDATE meta SET value = ? WHERE key = ?`, hashToken(token), metaApprovalTokenHash); err != nil {
+	if err := s.writeWithEvent(nil, "approval_token", func(tx *sql.Tx) (string, error) {
+		_, err := tx.Exec(`UPDATE meta SET value = ? WHERE key = ?`, hashToken(token), metaApprovalTokenHash)
+		return "approval token rotated", err
+	}); err != nil {
 		return "", err
 	}
-	s.LogEventGlobal("approval_token", "approval token rotated")
 	// Seals made with the old token can no longer be checked; seal the head
 	// with the new one so the newest seal always can be. Best effort: the
 	// rotation itself has already happened.
@@ -167,9 +174,8 @@ func (s *Store) DisableApprovalToken(current string) error {
 	if _, err := s.authorize(current); err != nil {
 		return err
 	}
-	if _, err := s.DB.Exec(`DELETE FROM meta WHERE key = ?`, metaApprovalTokenHash); err != nil {
-		return err
-	}
-	s.LogEventGlobal("approval_token", "approval token disabled")
-	return nil
+	return s.writeWithEvent(nil, "approval_token", func(tx *sql.Tx) (string, error) {
+		_, err := tx.Exec(`DELETE FROM meta WHERE key = ?`, metaApprovalTokenHash)
+		return "approval token disabled", err
+	})
 }

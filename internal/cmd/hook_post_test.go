@@ -10,7 +10,8 @@ import (
 // Only denials reached the audit trail; a reviewer could not see what an
 // agent changed during a session.
 func TestPostToolUseRecordsWritesAndCommandsOnTheSession(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	t.Chdir(t.TempDir())
 	task, _ := s.AddTask("t", "", "normal", store.TaskOpts{})
 	sid, err := s.BeginSession(store.SessionStart{TaskID: &task})
@@ -46,7 +47,8 @@ func TestPostToolUseRecordsWritesAndCommandsOnTheSession(t *testing.T) {
 }
 
 func TestPostToolUseRecordsNothingWithoutASession(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	t.Chdir(t.TempDir())
 	recordToolUse(s, strings.NewReader(`{"tool_name":"Edit","tool_input":{"file_path":"/p/x"}}`))
 	if events, _ := s.QueryEvents(store.EventFilter{Limit: 10}); len(events) != 0 {

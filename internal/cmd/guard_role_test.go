@@ -14,12 +14,13 @@ import (
 // enforces it: a session whose role has no Edit/Write cannot write files, through
 // the file tools or through Bash.
 
-func startRoleSession(t *testing.T, role string) {
+func startRoleSession(t *testing.T, role string) *cli {
 	t.Helper()
 	t.Setenv("ACLINE_ROLE", "")
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 	if role == "" {
-		return
+		return c
 	}
 	r, err := st.GetRoleByName(nil, role)
 	if err != nil {
@@ -28,24 +29,25 @@ func startRoleSession(t *testing.T, role string) {
 	if _, err := st.StartSession(nil, nil, &r.ID, ""); err != nil {
 		t.Fatal(err)
 	}
+	return c
 }
 
 func TestReadOnlyRolesCannotUseTheFileWriteTools(t *testing.T) {
 	for _, role := range []string{"security", "qa", "architect", "designer"} {
-		startRoleSession(t, role)
+		rc := startRoleSession(t, role)
 		for _, tool := range []string{"Edit", "Write", "NotebookEdit"} {
-			if blocked, why := checkRoleScope(tool, map[string]any{"file_path": "/x/y.go"}); !blocked || !strings.Contains(why, role) {
+			if blocked, why := checkRoleScope(rc.st, tool, map[string]any{"file_path": "/x/y.go"}); !blocked || !strings.Contains(why, role) {
 				t.Errorf("role %s: %s = (%v, %q), want blocked with the role named", role, tool, blocked, why)
 			}
 		}
-		if blocked, why := checkRoleScope("Read", map[string]any{"file_path": "/x/y.go"}); blocked {
+		if blocked, why := checkRoleScope(rc.st, "Read", map[string]any{"file_path": "/x/y.go"}); blocked {
 			t.Errorf("role %s: Read blocked: %s", role, why)
 		}
 	}
 }
 
 func TestReadOnlyRoleBashWrites(t *testing.T) {
-	startRoleSession(t, "security")
+	rc := startRoleSession(t, "security")
 	blocked := []string{
 		"sed -i s/a/b/ main.go", "sed -i.bak s/a/b/ main.go", "perl -pi -e 's/a/b/' main.go", "echo pwned > main.go", "echo more >> main.go",
 		"cat a | tee out.txt", "rm main.go", "mv a b", "cp a b", "touch new.go", "mkdir out", "truncate -s 0 main.go", "ln -s a b",
@@ -53,7 +55,7 @@ func TestReadOnlyRoleBashWrites(t *testing.T) {
 		"install -m 755 a /usr/local/bin/a", "patch -p1 < fix.diff", "dd if=/dev/zero of=x",
 	}
 	for _, c := range blocked {
-		if b, _ := checkRoleScope("Bash", map[string]any{"command": c}); !b {
+		if b, _ := checkRoleScope(rc.st, "Bash", map[string]any{"command": c}); !b {
 			t.Errorf("read-only role: expected BLOCK for %q", c)
 		}
 	}
@@ -63,7 +65,7 @@ func TestReadOnlyRoleBashWrites(t *testing.T) {
 		"gosec ./... 2>&1 | head", "sed -n 1,20p main.go", "find . -name '*.go' -print", "go build ./... 2>&1",
 	}
 	for _, c := range allowed {
-		if b, why := checkRoleScope("Bash", map[string]any{"command": c}); b {
+		if b, why := checkRoleScope(rc.st, "Bash", map[string]any{"command": c}); b {
 			t.Errorf("read-only role: expected ALLOW for %q, got %q", c, why)
 		}
 	}
@@ -71,37 +73,37 @@ func TestReadOnlyRoleBashWrites(t *testing.T) {
 
 func TestRolesThatMayWriteAreNotRestricted(t *testing.T) {
 	for _, role := range []string{"developer", "manager", "scrummaster", ""} {
-		startRoleSession(t, role)
+		rc := startRoleSession(t, role)
 		for _, tool := range []string{"Edit", "Write"} {
-			if b, why := checkRoleScope(tool, map[string]any{"file_path": "/x/y.go"}); b {
+			if b, why := checkRoleScope(rc.st, tool, map[string]any{"file_path": "/x/y.go"}); b {
 				t.Errorf("role %q: %s blocked: %s", role, tool, why)
 			}
 		}
-		if b, why := checkRoleScope("Bash", map[string]any{"command": "echo x > y.go"}); b {
+		if b, why := checkRoleScope(rc.st, "Bash", map[string]any{"command": "echo x > y.go"}); b {
 			t.Errorf("role %q: a redirect was blocked: %s", role, why)
 		}
 	}
 }
 
 func TestRoleFromTheEnvironmentAppliesToo(t *testing.T) {
-	startRoleSession(t, "")
+	rc := startRoleSession(t, "")
 	t.Setenv("ACLINE_ROLE", "qa")
-	if b, _ := checkRoleScope("Write", map[string]any{"file_path": "/x"}); !b {
+	if b, _ := checkRoleScope(rc.st, "Write", map[string]any{"file_path": "/x"}); !b {
 		t.Error("ACLINE_ROLE=qa should restrict writes")
 	}
 	t.Setenv("ACLINE_ROLE", "no-such-role")
-	if b, _ := checkRoleScope("Write", map[string]any{"file_path": "/x"}); b {
+	if b, _ := checkRoleScope(rc.st, "Write", map[string]any{"file_path": "/x"}); b {
 		t.Error("an unknown role must not block (it is not a role acline ships a contract for)")
 	}
 }
 
 func TestGuardCheckToolEnforcesTheRoleEndToEnd(t *testing.T) {
-	startRoleSession(t, "security")
-	out := runGuardCheckTool(t, `{"tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ main.go"}}`)
+	rc := startRoleSession(t, "security")
+	out := runGuardCheckTool(t, rc, `{"tool_name":"Bash","tool_input":{"command":"sed -i s/a/b/ main.go"}}`)
 	if !strings.Contains(out, `"permissionDecision":"deny"`) || !strings.Contains(out, "security") {
 		t.Fatalf("expected a role-based deny, got %q", out)
 	}
-	events, _ := st.ListEvents(nil, 10)
+	events, _ := rc.st.ListEvents(nil, 10)
 	found := false
 	for _, e := range events {
 		if e.Type == "guard_denied" && strings.Contains(e.Message, "security") {
@@ -111,7 +113,7 @@ func TestGuardCheckToolEnforcesTheRoleEndToEnd(t *testing.T) {
 	if !found {
 		t.Errorf("the denial should be audited as guard_denied: %+v", events)
 	}
-	if out := runGuardCheckTool(t, `{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`); out != "" {
+	if out := runGuardCheckTool(t, rc, `{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`); out != "" {
 		t.Errorf("go test must stay allowed for a read-only role, got %q", out)
 	}
 }
@@ -119,7 +121,8 @@ func TestGuardCheckToolEnforcesTheRoleEndToEnd(t *testing.T) {
 // Session deny-lists only bite for tools the hook is invoked for. The matcher now
 // covers the web and MCP tools, so a policy can deny them.
 func TestSessionPolicyCanDenyWebAndMcpTools(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
+	st := c.st
 	pol, err := (store.Policy{DenyTools: []string{"WebFetch", "mcp__acline__acline_task_done"}}).JSON()
 	if err != nil {
 		t.Fatal(err)
@@ -128,12 +131,12 @@ func TestSessionPolicyCanDenyWebAndMcpTools(t *testing.T) {
 		t.Fatal(err)
 	}
 	for _, tool := range []string{"WebFetch", "mcp__acline__acline_task_done"} {
-		out := runGuardCheckTool(t, `{"tool_name":"`+tool+`","tool_input":{"url":"https://example.com"}}`)
+		out := runGuardCheckTool(t, c, `{"tool_name":"`+tool+`","tool_input":{"url":"https://example.com"}}`)
 		if !strings.Contains(out, `"permissionDecision":"deny"`) {
 			t.Errorf("%s should be denied by the session policy, got %q", tool, out)
 		}
 	}
-	if out := runGuardCheckTool(t, `{"tool_name":"WebSearch","tool_input":{"query":"x"}}`); out != "" {
+	if out := runGuardCheckTool(t, c, `{"tool_name":"WebSearch","tool_input":{"query":"x"}}`); out != "" {
 		t.Errorf("a tool the policy does not deny stays allowed, got %q", out)
 	}
 }
@@ -166,26 +169,26 @@ func readScaffoldSettings(t *testing.T) string {
 
 // Ending the session was the way out of a read-only role.
 func TestReadOnlyRoleCannotEndOrRestartItsSessionThroughBash(t *testing.T) {
-	startRoleSession(t, "security")
+	rc := startRoleSession(t, "security")
 	for _, c := range []string{"acline session end -m done", "acline session end && acline session start --role developer", "cd /p && acline --db x.db session start --role developer"} {
-		if b, why := checkRoleScope("Bash", map[string]any{"command": c}); !b || !strings.Contains(why, "read-only") {
+		if b, why := checkRoleScope(rc.st, "Bash", map[string]any{"command": c}); !b || !strings.Contains(why, "read-only") {
 			t.Errorf("expected BLOCK for %q, got (%v, %q)", c, b, why)
 		}
 	}
 	for _, c := range []string{"acline session current", `acline note add "ask the user to end the session"`} {
-		if b, why := checkRoleScope("Bash", map[string]any{"command": c}); b {
+		if b, why := checkRoleScope(rc.st, "Bash", map[string]any{"command": c}); b {
 			t.Errorf("expected ALLOW for %q, got %q", c, why)
 		}
 	}
-	startRoleSession(t, "developer")
-	if b, why := checkRoleScope("Bash", map[string]any{"command": "acline session end -m done"}); b {
+	rc = startRoleSession(t, "developer")
+	if b, why := checkRoleScope(rc.st, "Bash", map[string]any{"command": "acline session end -m done"}); b {
 		t.Errorf("a writable role may end its session, got %q", why)
 	}
 }
 
 // Common writers the read-only role check missed.
 func TestReadOnlyRoleCatchesCommonIndirectWriters(t *testing.T) {
-	startRoleSession(t, "qa")
+	rc := startRoleSession(t, "qa")
 	blocked := []string{
 		"git checkout -- main.go", "git restore main.go", "git apply fix.diff", "git stash", "git commit -am wip",
 		"git reset HEAD~1", "git -C sub checkout main",
@@ -195,7 +198,7 @@ func TestReadOnlyRoleCatchesCommonIndirectWriters(t *testing.T) {
 		"wget https://x/f", "npm install", "npm run build", "yarn add left-pad", "pnpm i", "make", "make build",
 	}
 	for _, c := range blocked {
-		if b, _ := checkRoleScope("Bash", map[string]any{"command": c}); !b {
+		if b, _ := checkRoleScope(rc.st, "Bash", map[string]any{"command": c}); !b {
 			t.Errorf("read-only role: expected BLOCK for %q", c)
 		}
 	}
@@ -205,8 +208,40 @@ func TestReadOnlyRoleCatchesCommonIndirectWriters(t *testing.T) {
 		"tar -tzf a.tgz", "curl -s https://x", "npm test", "npm ls", "cargo test",
 	}
 	for _, c := range allowed {
-		if b, why := checkRoleScope("Bash", map[string]any{"command": c}); b {
+		if b, why := checkRoleScope(rc.st, "Bash", map[string]any{"command": c}); b {
 			t.Errorf("read-only role: expected ALLOW for %q, got %q", c, why)
+		}
+	}
+}
+
+// A read-only agent (qa, security, architect, designer) was held to read-only
+// only when its session ran as that role; picked from Claude Code's agent menu
+// it still had Bash and could write. Claude Code names the running subagent in
+// the hook input (agent_type), so the guard applies the role from that.
+func TestReadOnlySubagentIsHeldToReadOnlyWithoutARoleSession(t *testing.T) {
+	rc := startRoleSession(t, "") // no session, no ACLINE_ROLE
+	judge := func(agentType, tool string, input map[string]any) string {
+		payload, _ := json.Marshal(map[string]any{"tool_name": tool, "tool_input": input, "agent_type": agentType})
+		var out strings.Builder
+		if err := guardCheckTool(rc.st, defaultVaultPath(), strings.NewReader(string(payload)), &out); err != nil {
+			t.Fatal(err)
+		}
+		return out.String()
+	}
+	for _, agent := range []string{"qa", "security", "architect", "designer"} {
+		if out := judge(agent, "Bash", map[string]any{"command": "echo x > y.go"}); !strings.Contains(out, "read-only") {
+			t.Errorf("%s subagent: shell write allowed (%q)", agent, out)
+		}
+		if out := judge(agent, "Write", map[string]any{"file_path": "y.go"}); !strings.Contains(out, "read-only") {
+			t.Errorf("%s subagent: Write allowed (%q)", agent, out)
+		}
+		if out := judge(agent, "Bash", map[string]any{"command": "go test ./..."}); out != "" {
+			t.Errorf("%s subagent: a read-only command was denied: %s", agent, out)
+		}
+	}
+	for _, agent := range []string{"developer", "", "Explore", "general-purpose"} {
+		if out := judge(agent, "Bash", map[string]any{"command": "echo x > y.go"}); out != "" {
+			t.Errorf("agent_type %q: a write was denied: %s", agent, out)
 		}
 	}
 }

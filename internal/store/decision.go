@@ -6,6 +6,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"acline/internal/redact"
 )
 
 type Decision struct {
@@ -38,20 +40,22 @@ type DecisionOpts struct {
 }
 
 func (s *Store) AddDecision(title string, opts DecisionOpts) (int64, error) {
-	title = scrubText(title)
-	opts.Context, opts.Decision, opts.Rationale = scrubText(opts.Context), scrubText(opts.Decision), scrubText(opts.Rationale)
+	redacted := redact.Fields(&title, &opts.Context, &opts.Decision, &opts.Rationale)
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
-		`INSERT INTO decisions (title, status, scope, context, decision, rationale, project_id,
-			actor_type, actor_id, model, created_at, updated_at)
-		 VALUES (?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		title, nullStr(opts.Scope), nullStr(opts.Context), nullStr(opts.Decision), nullStr(opts.Rationale),
-		nullInt(opts.ProjectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
+	id, err := s.writeRecordWithEvent("decision", "decision_recorded", redacted, func(tx *sql.Tx) (int64, string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO decisions (title, status, scope, context, decision, rationale, project_id,
+				actor_type, actor_id, model, created_at, updated_at)
+			 VALUES (?, 'proposed', ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			title, nullStr(opts.Scope), nullStr(opts.Context), nullStr(opts.Decision), nullStr(opts.Rationale),
+			nullInt(opts.ProjectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now,
+		)
+		if err != nil {
+			return 0, "", err
+		}
+		id, err := res.LastInsertId()
+		return id, fmt.Sprintf("decision #%d proposed: %s", id, title), err
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -77,12 +81,12 @@ func (s *Store) AcceptDecision(id int64, token string) error {
 	return s.setDecisionStatus(id, "accepted")
 }
 
-// ErrAgentCannotRetireDecision is returned when an agent actor tries to reject or
-// supersede an accepted decision without an approval token. Retiring one removes
+// ErrAgentCannotRetireDecision is returned when an agent actor tries to reject,
+// supersede or deprecate an accepted decision without an approval token. Retiring one removes
 // a rule later work is checked against, so it is as much a person's call as
 // accepting it was. Rejecting or superseding a decision still only proposed stays
 // open: nothing depends on it yet.
-var ErrAgentCannotRetireDecision = errors.New("an agent cannot reject or supersede an accepted decision: a person must decide (propose a replacement with `acline decision add`)")
+var ErrAgentCannotRetireDecision = errors.New("an agent cannot reject, supersede or deprecate an accepted decision: a person must decide (propose a replacement with `acline decision add`)")
 
 // retireDecision refuses an agent without the approval token when decision id is
 // accepted.
@@ -105,12 +109,23 @@ func (s *Store) RejectDecision(id int64, token string) error {
 	return s.setDecisionStatus(id, "rejected")
 }
 
+// DeprecateDecision marks an accepted decision deprecated: it no longer applies
+// and nothing replaces it (SupersedeDecision when something does). Only an
+// accepted decision can be deprecated, so it always needs a person; see
+// ErrAgentCannotRetireDecision.
+func (s *Store) DeprecateDecision(id int64, token string) error {
+	if err := s.retireDecision(id, token); err != nil {
+		return err
+	}
+	return s.setDecisionStatus(id, "deprecated")
+}
+
 func (s *Store) setDecisionStatus(id int64, status string) error {
 	if !ValidDecisionStatuses[status] {
 		return fmt.Errorf("invalid decision status %q", status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	return s.changeWithEvent("decision", id, "decision_recorded", fmt.Sprintf("decision #%d %s", id, status),
+	return s.transitionWithEvent("decision", id, status, "decision_recorded", fmt.Sprintf("decision #%d %s", id, status),
 		`UPDATE decisions SET status = ?, updated_at = ? WHERE id = ?`, status, now, id)
 }
 
@@ -127,7 +142,7 @@ func (s *Store) SupersedeDecision(id, newID int64, token string) error {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	return s.changeWithEvent("decision", id, "decision_recorded", fmt.Sprintf("decision #%d superseded by #%d", id, newID),
+	return s.transitionWithEvent("decision", id, "superseded", "decision_recorded", fmt.Sprintf("decision #%d superseded by #%d", id, newID),
 		`UPDATE decisions SET status = 'superseded', superseded_by = ?, updated_at = ? WHERE id = ?`, newID, now, id)
 }
 

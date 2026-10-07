@@ -14,26 +14,39 @@ type ExportRecord struct {
 	Data map[string]any `json:"data"`
 }
 
+// exportTables is every table snapshotTables backs up (the same exclusions:
+// no approval-token hash, no derived vectors), so the export is the whole
+// record; TestExportCoversEverySnapshotTable keeps the two lists together.
+// since is the condition `--since` adds, with one placeholder for the date:
+// the row's own time, or its plan's for the plan tables that have none.
 var exportTables = []struct {
-	kind      string
-	table     string
-	timeField string
+	kind  string
+	table string
+	since string
 }{
-	{"spec", "specs", "created_at"},
-	{"spec_version", "spec_versions", "created_at"},
-	{"decision", "decisions", "created_at"},
-	{"task", "tasks", "created_at"},
-	{"session", "sessions", "started_at"},
-	{"event", "events", "created_at"},
-	{"approval", "approvals", "created_at"},
-	{"check", "checks", "created_at"},
-	{"dependency", "dependencies", "created_at"},
-	{"eval", "evals", "created_at"},
-	{"memory", "memory", "created_at"},
-	{"feature", "features", "created_at"},
-	{"criterion", "task_criteria", "created_at"},
-	{"link", "task_links", "created_at"},
-	{"note", "notes", "created_at"},
+	{"project", "projects", "created_at >= ?"},
+	{"role", "roles", "created_at >= ?"},
+	{"milestone", "milestones", "created_at >= ?"},
+	{"spec", "specs", "created_at >= ?"},
+	{"spec_version", "spec_versions", "created_at >= ?"},
+	{"decision", "decisions", "created_at >= ?"},
+	{"plan", "plans", "created_at >= ?"},
+	{"plan_item", "plan_items", "plan_id IN (SELECT id FROM plans WHERE created_at >= ?)"},
+	{"plan_edge", "plan_edges", "plan_id IN (SELECT id FROM plans WHERE created_at >= ?)"},
+	{"plan_criterion", "plan_criteria", "plan_item_id IN (SELECT pi.id FROM plan_items pi JOIN plans p ON p.id = pi.plan_id WHERE p.created_at >= ?)"},
+	{"task", "tasks", "created_at >= ?"},
+	{"session", "sessions", "started_at >= ?"},
+	{"event", "events", "created_at >= ?"},
+	{"approval", "approvals", "created_at >= ?"},
+	{"check", "checks", "created_at >= ?"},
+	{"check_runner", "check_runners", "created_at >= ?"},
+	{"dependency", "dependencies", "created_at >= ?"},
+	{"eval", "evals", "created_at >= ?"},
+	{"memory", "memory", "created_at >= ?"},
+	{"feature", "features", "created_at >= ?"},
+	{"criterion", "task_criteria", "created_at >= ?"},
+	{"link", "task_links", "created_at >= ?"},
+	{"note", "notes", "created_at >= ?"},
 }
 
 // ExportJSONL writes every record as one JSON object per line. `since` is an
@@ -42,13 +55,13 @@ func (s *Store) ExportJSONL(w io.Writer, since string) (int, error) {
 	enc := json.NewEncoder(w)
 	total := 0
 	for _, t := range exportTables {
-		// t.table/t.timeField come only from the hardcoded exportTables literal
-		// above, never from caller input -- safe to Sprintf into SQL as table/
-		// column identifiers; values still go through placeholders below.
+		// t.table/t.since come only from the hardcoded exportTables literal
+		// above, never from caller input -- safe to Sprintf into SQL; the date
+		// still goes through a placeholder.
 		q := fmt.Sprintf("SELECT * FROM %s", t.table)
 		var args []any
 		if since != "" {
-			q += fmt.Sprintf(" WHERE %s >= ?", t.timeField)
+			q += " WHERE " + t.since
 			args = append(args, since)
 		}
 		q += " ORDER BY id"

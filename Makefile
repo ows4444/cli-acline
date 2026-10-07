@@ -39,7 +39,7 @@ EXT_ID      := $(EXT_PUB).$(EXT_NAME)
 VSIX        := $(EXT_DIR)/$(EXT_NAME)-$(EXT_VERSION).vsix
 VSCE        ?= npx --yes @vscode/vsce
 
-.PHONY: help all build install check vuln generate cli install-cli backup-store ext-deps ext-build ext-test ext-package install-ext versions clean
+.PHONY: help all build install check vuln cyclo generate cli install-cli backup-store ext-deps ext-build ext-test ext-package install-ext versions clean
 
 help: ## Show this help
 	@echo "ACLine build and install"
@@ -72,6 +72,9 @@ check: ## Run vet, race-detector tests, staticcheck and the extension tests (wha
 
 vuln: ## Scan Go dependencies for known vulnerabilities (govulncheck)
 	go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./internal/... .
+
+cyclo: ## Report non-test functions with cyclomatic complexity over 30 (advisory; CI does not run it)
+	-go run github.com/fzipp/gocyclo/cmd/gocyclo@v0.6.0 -over 30 -ignore '_test\.go$$' .
 
 # --- CLI ---------------------------------------------------------------
 generate: ## Regenerate the extension's TypeScript types from the MCP server's structs

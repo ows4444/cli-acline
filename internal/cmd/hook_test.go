@@ -1,6 +1,7 @@
 package cmd
 
 import (
+	"acline/internal/store"
 	"bytes"
 	"encoding/json"
 	"errors"
@@ -23,24 +24,22 @@ type selfCall struct {
 }
 
 // fakeSelf replaces the subprocess `acline hook` runs to call itself.
-func fakeSelf(t *testing.T, reply func(args []string) (string, error)) *[]selfCall {
+func fakeSelf(t *testing.T, c *cli, reply func(args []string) (string, error)) *[]selfCall {
 	t.Helper()
 	var calls []selfCall
-	prev := runSelf
-	runSelf = func(dir string, args ...string) (string, error) {
+	c.runSelf = func(dir string, args ...string) (string, error) {
 		calls = append(calls, selfCall{dir, args})
 		return reply(args)
 	}
-	t.Cleanup(func() { runSelf = prev })
 	return &calls
 }
 
 // --- pre-tool-use: the guard passthrough, failing closed ---
 
 func TestPreToolUseForwardsADenyDecisionVerbatim(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
 	var out bytes.Buffer
-	if err := runPreToolUse(strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}`), &out); err != nil {
+	if err := c.runPreToolUse(defaultVaultPath(), strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"rm -rf /"}}`), &out); err != nil {
 		t.Fatal(err)
 	}
 	var d hookDenyOutput
@@ -50,9 +49,9 @@ func TestPreToolUseForwardsADenyDecisionVerbatim(t *testing.T) {
 }
 
 func TestPreToolUseAllowProducesNoOutput(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
 	var out bytes.Buffer
-	if err := runPreToolUse(strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`), &out); err != nil {
+	if err := c.runPreToolUse(defaultVaultPath(), strings.NewReader(`{"tool_name":"Bash","tool_input":{"command":"go test ./..."}}`), &out); err != nil {
 		t.Fatal(err)
 	}
 	if out.Len() != 0 {
@@ -61,25 +60,25 @@ func TestPreToolUseAllowProducesNoOutput(t *testing.T) {
 }
 
 func TestPreToolUseEmptyStdinResolves(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
 	var out bytes.Buffer
-	if err := runPreToolUse(strings.NewReader(""), &out); err != nil || out.Len() != 0 {
+	if err := c.runPreToolUse(defaultVaultPath(), strings.NewReader(""), &out); err != nil || out.Len() != 0 {
 		t.Fatalf("empty stdin: %v, %q", err, out.String())
 	}
 }
 
 func TestPreToolUseFailsClosedWhenTheGuardErrorsPanicsOrHangs(t *testing.T) {
-	for name, guard := range map[string]func(io.Reader, io.Writer) error{
-		"error": func(io.Reader, io.Writer) error { return errors.New("the store is unavailable") },
-		"panic": func(io.Reader, io.Writer) error { panic("boom") },
-		"hang":  func(io.Reader, io.Writer) error { time.Sleep(2 * time.Second); return nil },
+	type guardFunc = func(*store.Store, string, io.Reader, io.Writer) error
+	for name, guard := range map[string]guardFunc{
+		"error": func(*store.Store, string, io.Reader, io.Writer) error { return errors.New("the store is unavailable") },
+		"panic": func(*store.Store, string, io.Reader, io.Writer) error { panic("boom") },
+		"hang":  func(*store.Store, string, io.Reader, io.Writer) error { time.Sleep(2 * time.Second); return nil },
 	} {
 		t.Run(name, func(t *testing.T) {
-			prevGuard, prevTimeout := guardRun, hookTimeout
-			guardRun, hookTimeout = guard, 100*time.Millisecond
-			t.Cleanup(func() { guardRun, hookTimeout = prevGuard, prevTimeout })
+			c := newCLI()
+			c.guard, c.hookTimeout = guard, 100*time.Millisecond
 			var out bytes.Buffer
-			if err := runPreToolUse(strings.NewReader(`{"tool_name":"Bash"}`), &out); err != nil {
+			if err := c.runPreToolUse("vault", strings.NewReader(`{"tool_name":"Bash"}`), &out); err != nil {
 				t.Fatal(err)
 			}
 			var d hookDenyOutput
@@ -135,14 +134,15 @@ func TestShellQuoteMatchesWhatAShellNeeds(t *testing.T) {
 
 func TestSessionStartRunsFromTheProjectRootAndWrapsTheDashboard(t *testing.T) {
 	project := t.TempDir()
-	calls := fakeSelf(t, func(args []string) (string, error) {
+	c := newCLI()
+	calls := fakeSelf(t, c, func(args []string) (string, error) {
 		if args[0] == "dashboard" {
 			return "open tasks: 1\n", nil
 		}
 		return "# Project context\n", nil
 	})
 	var out bytes.Buffer
-	if err := runSessionStart(strings.NewReader(`{"model":"m"}`), &out, project, ""); err != nil {
+	if err := c.runSessionStart(strings.NewReader(`{"model":"m"}`), &out, project, ""); err != nil {
 		t.Fatal(err)
 	}
 	if len(*calls) != 2 {
@@ -174,9 +174,10 @@ func TestSessionStartInjectsAnUnfinishedBootstrapAndReportsFailuresWithoutRaisin
 	project := t.TempDir()
 	os.MkdirAll(filepath.Join(project, ".claude", "vault"), 0o755)
 	os.WriteFile(filepath.Join(project, ".claude", "vault", "BOOTSTRAP.md"), []byte("Welcome, first run."), 0o644)
-	fakeSelf(t, func(args []string) (string, error) { return "", errors.New("exit status 1") })
+	c := newCLI()
+	fakeSelf(t, c, func(args []string) (string, error) { return "", errors.New("exit status 1") })
 	var out bytes.Buffer
-	if err := runSessionStart(strings.NewReader(""), &out, project, ""); err != nil {
+	if err := c.runSessionStart(strings.NewReader(""), &out, project, ""); err != nil {
 		t.Fatalf("a failing acline must not fail the hook: %v", err)
 	}
 	s := out.String()
@@ -246,7 +247,8 @@ func TestExtractMemoryLogLines(t *testing.T) {
 
 func TestCaptureSendsOnlyNewLinesAndTracksSessionsIndependently(t *testing.T) {
 	project := t.TempDir()
-	calls := fakeSelf(t, func([]string) (string, error) { return "", nil })
+	c := newCLI()
+	calls := fakeSelf(t, c, func([]string) (string, error) { return "", nil })
 	state := filepath.Join(project, ".claude", "vault", ".state", "memory-log-captured.json")
 	notes := func() []string {
 		var out []string
@@ -265,20 +267,20 @@ func TestCaptureSendsOnlyNewLinesAndTracksSessionsIndependently(t *testing.T) {
 	}
 
 	p := writeTranscript(t, assistantEntry("MEMORY_LOG: one"), assistantEntry("MEMORY_LOG: two"))
-	captureMemoryLog("s1", p, state, project)
+	c.captureMemoryLog("s1", p, state, project)
 	if got := notes(); strings.Join(got, ",") != "one,two" {
 		t.Fatalf("first capture sent %v", got)
 	}
-	captureMemoryLog("s1", p, state, project) // PreCompact then SessionEnd: nothing new
+	c.captureMemoryLog("s1", p, state, project) // PreCompact then SessionEnd: nothing new
 	if got := notes(); len(got) != 2 {
 		t.Fatalf("a second capture with no new lines sent %v", got)
 	}
 	p2 := writeTranscript(t, assistantEntry("MEMORY_LOG: one"), assistantEntry("MEMORY_LOG: two"), assistantEntry("MEMORY_LOG: three"))
-	captureMemoryLog("s1", p2, state, project)
+	c.captureMemoryLog("s1", p2, state, project)
 	if got := notes(); strings.Join(got, ",") != "one,two,three" {
 		t.Fatalf("only the delta should be sent, got %v", got)
 	}
-	captureMemoryLog("other-session", p2, state, project) // sessions are independent
+	c.captureMemoryLog("other-session", p2, state, project) // sessions are independent
 	if got := notes(); len(got) != 6 {
 		t.Fatalf("a different session should send its own lines, got %v", got)
 	}
@@ -291,10 +293,11 @@ func TestCaptureSendsOnlyNewLinesAndTracksSessionsIndependently(t *testing.T) {
 
 func TestCaptureToleratesAnUnreadableStateFile(t *testing.T) {
 	project := t.TempDir()
-	calls := fakeSelf(t, func([]string) (string, error) { return "", nil })
+	c := newCLI()
+	calls := fakeSelf(t, c, func([]string) (string, error) { return "", nil })
 	state := filepath.Join(project, "state.json")
 	os.WriteFile(state, []byte("{corrupt"), 0o644)
-	captureMemoryLog("s", writeTranscript(t, assistantEntry("MEMORY_LOG: x")), state, project)
+	c.captureMemoryLog("s", writeTranscript(t, assistantEntry("MEMORY_LOG: x")), state, project)
 	if len(*calls) != 1 {
 		t.Fatalf("calls = %+v", *calls)
 	}
@@ -304,10 +307,11 @@ func TestPreCompactAndSessionEndShareOneEntryPointFromAnUnrelatedCwd(t *testing.
 	project := t.TempDir()
 	t.Chdir(t.TempDir()) // the session's shell has cd'd somewhere else
 	t.Setenv("CLAUDE_PROJECT_DIR", project)
-	calls := fakeSelf(t, func([]string) (string, error) { return "", nil })
+	c := newCLI()
+	calls := fakeSelf(t, c, func([]string) (string, error) { return "", nil })
 	p := writeTranscript(t, assistantEntry("MEMORY_LOG: from another cwd"))
 	payload := `{"session_id":"s","transcript_path":"` + p + `"}`
-	if err := runMemoryLogHook(strings.NewReader(payload), project); err != nil {
+	if err := c.runMemoryLogHook(strings.NewReader(payload), project); err != nil {
 		t.Fatal(err)
 	}
 	if len(*calls) != 1 || (*calls)[0].dir != project {
@@ -323,11 +327,12 @@ func TestPreCompactAndSessionEndShareOneEntryPointFromAnUnrelatedCwd(t *testing.
 func TestSessionStartContextIsBounded(t *testing.T) {
 	project := t.TempDir()
 	huge := strings.Repeat("é", 40<<10) // multibyte, so a byte cut could split a character
-	calls := fakeSelf(t, func(args []string) (string, error) {
+	c := newCLI()
+	calls := fakeSelf(t, c, func(args []string) (string, error) {
 		return huge, nil
 	})
 	var out bytes.Buffer
-	if err := runSessionStart(strings.NewReader(`{}`), &out, project, ""); err != nil {
+	if err := c.runSessionStart(strings.NewReader(`{}`), &out, project, ""); err != nil {
 		t.Fatal(err)
 	}
 	var got struct {
@@ -361,7 +366,8 @@ func TestSessionStartContextIsBounded(t *testing.T) {
 func TestCaptureReadsOnlyWhatWasAppended(t *testing.T) {
 	project := t.TempDir()
 	var sent []string
-	fakeSelf(t, func(args []string) (string, error) {
+	c := newCLI()
+	fakeSelf(t, c, func(args []string) (string, error) {
 		if args[0] == "note" {
 			sent = append(sent, args[2])
 		}
@@ -369,7 +375,7 @@ func TestCaptureReadsOnlyWhatWasAppended(t *testing.T) {
 	})
 	state := filepath.Join(project, "state.json")
 	p := writeTranscript(t, assistantEntry("MEMORY_LOG: one"))
-	captureMemoryLog("s", p, state, project)
+	c.captureMemoryLog("s", p, state, project)
 
 	f, _ := os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
 	two, _ := json.Marshal(assistantEntry("MEMORY_LOG: two"))
@@ -377,14 +383,14 @@ func TestCaptureReadsOnlyWhatWasAppended(t *testing.T) {
 	f.Write(append(two, '\n'))
 	f.Write(three[:len(three)/2]) // still being written
 	f.Close()
-	captureMemoryLog("s", p, state, project)
+	c.captureMemoryLog("s", p, state, project)
 	if strings.Join(sent, ",") != "one,two" {
 		t.Fatalf("sent %v", sent)
 	}
 	f, _ = os.OpenFile(p, os.O_APPEND|os.O_WRONLY, 0o644)
 	f.Write(append(three[len(three)/2:], '\n'))
 	f.Close()
-	captureMemoryLog("s", p, state, project)
+	c.captureMemoryLog("s", p, state, project)
 	if strings.Join(sent, ",") != "one,two,three" {
 		t.Fatalf("the completed line was not captured once: %v", sent)
 	}
@@ -393,7 +399,8 @@ func TestCaptureReadsOnlyWhatWasAppended(t *testing.T) {
 func TestCaptureHonoursTheOldCountOnlyState(t *testing.T) {
 	project := t.TempDir()
 	var sent []string
-	fakeSelf(t, func(args []string) (string, error) {
+	c := newCLI()
+	fakeSelf(t, c, func(args []string) (string, error) {
 		if args[0] == "note" {
 			sent = append(sent, args[2])
 		}
@@ -402,7 +409,7 @@ func TestCaptureHonoursTheOldCountOnlyState(t *testing.T) {
 	state := filepath.Join(project, "state.json")
 	os.WriteFile(state, []byte(`{"s": 2}`), 0o644) // two lines already sent by an older acline
 	p := writeTranscript(t, assistantEntry("MEMORY_LOG: one"), assistantEntry("MEMORY_LOG: two"), assistantEntry("MEMORY_LOG: three"))
-	captureMemoryLog("s", p, state, project)
+	c.captureMemoryLog("s", p, state, project)
 	if strings.Join(sent, ",") != "three" {
 		t.Fatalf("sent %v, want only the line the old state had not sent", sent)
 	}

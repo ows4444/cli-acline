@@ -36,72 +36,36 @@ func (s *Store) ComputeMetricsFor(projectID *int64) (*Metrics, error) {
 		TasksByActor:  map[string]int{},
 		EventsByActor: map[string]int{},
 	}
-	// scoped adds the project condition for a table of kind to a query that has
-	// (where = true) or lacks a WHERE clause, and returns its arguments.
-	const inTasks = `task_id IN (SELECT id FROM tasks WHERE project_id = ?)`
-	scoped := func(kind string, where bool) (string, []any) {
-		if projectID == nil {
-			return "", nil
-		}
-		cond, n := `project_id = ?`, 1
-		switch kind {
-		case "task_rows":
-			cond = inTasks
-		case "events":
-			cond, n = `(`+inTasks+` OR session_id IN (SELECT id FROM sessions WHERE project_id = ?))`, 2
-		case "dependencies":
-			cond, n = `(project_id = ? OR `+inTasks+`)`, 2
-		}
-		args := make([]any, n)
-		for i := range args {
-			args[i] = *projectID
-		}
-		if where {
-			return ` AND ` + cond, args
-		}
-		return ` WHERE ` + cond, args
+	scope := metricsScope{projectID}
+	counts := []struct {
+		dest  *int
+		query string
+		kind  string
+		where bool
+	}{
+		{&m.TasksTotal, `SELECT COUNT(*) FROM tasks`, "tasks", false},
+		{&m.TasksDone, `SELECT COUNT(*) FROM tasks WHERE status = 'done'`, "tasks", true},
+		{&m.ChecksTotal, `SELECT COUNT(*) FROM checks`, "task_rows", false},
+		{&m.ChecksFailed, `SELECT COUNT(*) FROM checks WHERE status = 'fail'`, "task_rows", true},
+		{&m.ApprovalsTotal, `SELECT COUNT(*) FROM approvals`, "task_rows", false},
+		{&m.Overrides, `SELECT COUNT(*) FROM approvals WHERE decision = 'overridden'`, "task_rows", true},
+		{&m.UnverifiedDeps, `SELECT COUNT(*) FROM dependencies WHERE verified = 0`, "dependencies", true},
+		{&m.PendingMemory, `SELECT COUNT(*) FROM memory WHERE status = 'pending' AND stale = 0`, "memory", true},
+		{&m.PolicyViolations, `SELECT COUNT(*) FROM events WHERE type = 'policy_violation'`, "events", true},
+		{&m.GuardDenials, `SELECT COUNT(*) FROM events WHERE type = 'guard_denied'`, "events", true},
 	}
-	count := func(dest *int, query, kind string, where bool) error {
-		cond, args := scoped(kind, where)
-		return s.DB.QueryRow(query+cond, args...).Scan(dest)
+	for _, c := range counts {
+		cond, args := scope.cond(c.kind, c.where)
+		if err := s.DB.QueryRow(c.query+cond, args...).Scan(c.dest); err != nil {
+			return nil, err
+		}
 	}
-
-	if err := count(&m.TasksTotal, `SELECT COUNT(*) FROM tasks`, "tasks", false); err != nil {
-		return nil, err
-	}
-	if err := count(&m.TasksDone, `SELECT COUNT(*) FROM tasks WHERE status = 'done'`, "tasks", true); err != nil {
-		return nil, err
-	}
-	cond, args := scoped("tasks", false)
+	cond, args := scope.cond("tasks", false)
 	if err := s.countBy(`SELECT COALESCE(actor_type, 'unknown'), COUNT(*) FROM tasks`+cond+` GROUP BY 1`, m.TasksByActor, args...); err != nil {
 		return nil, err
 	}
-	cond, args = scoped("events", false)
+	cond, args = scope.cond("events", false)
 	if err := s.countBy(`SELECT COALESCE(actor_type, 'unknown'), COUNT(*) FROM events`+cond+` GROUP BY 1`, m.EventsByActor, args...); err != nil {
-		return nil, err
-	}
-	if err := count(&m.ChecksTotal, `SELECT COUNT(*) FROM checks`, "task_rows", false); err != nil {
-		return nil, err
-	}
-	if err := count(&m.ChecksFailed, `SELECT COUNT(*) FROM checks WHERE status = 'fail'`, "task_rows", true); err != nil {
-		return nil, err
-	}
-	if err := count(&m.ApprovalsTotal, `SELECT COUNT(*) FROM approvals`, "task_rows", false); err != nil {
-		return nil, err
-	}
-	if err := count(&m.Overrides, `SELECT COUNT(*) FROM approvals WHERE decision = 'overridden'`, "task_rows", true); err != nil {
-		return nil, err
-	}
-	if err := count(&m.UnverifiedDeps, `SELECT COUNT(*) FROM dependencies WHERE verified = 0`, "dependencies", true); err != nil {
-		return nil, err
-	}
-	if err := count(&m.PendingMemory, `SELECT COUNT(*) FROM memory WHERE status = 'pending' AND stale = 0`, "memory", true); err != nil {
-		return nil, err
-	}
-	if err := count(&m.PolicyViolations, `SELECT COUNT(*) FROM events WHERE type = 'policy_violation'`, "events", true); err != nil {
-		return nil, err
-	}
-	if err := count(&m.GuardDenials, `SELECT COUNT(*) FROM events WHERE type = 'guard_denied'`, "events", true); err != nil {
 		return nil, err
 	}
 
@@ -119,15 +83,53 @@ func (s *Store) ComputeMetricsFor(projectID *int64) (*Metrics, error) {
 	}
 
 	// Cost is the third lens alongside utilization and impact.
-	cond, args = scoped("sessions", false)
+	cond, args = scope.cond("sessions", false)
 	if err := s.DB.QueryRow(`
 		SELECT COUNT(*), COALESCE(SUM(tokens_in), 0), COALESCE(SUM(tokens_out), 0), COALESCE(SUM(cost_usd), 0)
 		FROM sessions`+cond, args...).Scan(&m.Sessions, &m.TokensIn, &m.TokensOut, &m.CostUSD); err != nil {
 		return nil, err
 	}
 
-	// Most recent result per suite, for the autonomy-promotion picture.
-	cond, args = scoped("task_rows", false)
+	var err error
+	m.LatestEvals, err = s.latestEvals(scope)
+	if err != nil {
+		return nil, err
+	}
+	return m, nil
+}
+
+// metricsScope restricts a metric to one project (nil: every project).
+type metricsScope struct{ projectID *int64 }
+
+// cond is the project condition for a table of kind, to append to a query that
+// has (where = true) or lacks a WHERE clause, and its arguments.
+func (sc metricsScope) cond(kind string, where bool) (string, []any) {
+	if sc.projectID == nil {
+		return "", nil
+	}
+	const inTasks = `task_id IN (SELECT id FROM tasks WHERE project_id = ?)`
+	cond, n := `project_id = ?`, 1
+	switch kind {
+	case "task_rows":
+		cond = inTasks
+	case "events":
+		cond, n = `(`+inTasks+` OR session_id IN (SELECT id FROM sessions WHERE project_id = ?))`, 2
+	case "dependencies":
+		cond, n = `(project_id = ? OR `+inTasks+`)`, 2
+	}
+	args := make([]any, n)
+	for i := range args {
+		args[i] = *sc.projectID
+	}
+	if where {
+		return ` AND ` + cond, args
+	}
+	return ` WHERE ` + cond, args
+}
+
+// latestEvals is the most recent eval per suite, for the autonomy-promotion picture.
+func (s *Store) latestEvals(scope metricsScope) ([]Eval, error) {
+	cond, args := scope.cond("task_rows", false)
 	rows, err := s.DB.Query(`
 		SELECT e.id, e.task_id, e.suite, e.pass_rate, e.sample_size, e.note, e.actor_type, e.actor_id, e.created_at
 		FROM evals e
@@ -138,19 +140,16 @@ func (s *Store) ComputeMetricsFor(projectID *int64) (*Metrics, error) {
 		return nil, err
 	}
 	defer rows.Close()
+	var out []Eval
 	for rows.Next() {
 		var e Eval
 		if err := rows.Scan(&e.ID, &e.TaskID, &e.Suite, &e.PassRate, &e.SampleSize,
 			&e.Note, &e.ActorType, &e.ActorID, &e.CreatedAt); err != nil {
 			return nil, err
 		}
-		m.LatestEvals = append(m.LatestEvals, e)
+		out = append(out, e)
 	}
-	if err := rows.Err(); err != nil {
-		return nil, err
-	}
-
-	return m, nil
+	return out, rows.Err()
 }
 
 func (s *Store) countBy(query string, dest map[string]int, args ...any) error {

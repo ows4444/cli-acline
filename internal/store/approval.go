@@ -2,7 +2,6 @@ package store
 
 import (
 	"errors"
-	"fmt"
 )
 
 // ErrAgentCannotApprove is returned when an agent actor tries to record an
@@ -21,6 +20,7 @@ type ApprovalRequest struct {
 	By       string // who approved; empty = the recording actor
 	Note     string
 	Token    string // approval token; only consulted when the store has one enabled
+	TreeHash string // fingerprint of the code being approved (internal/worktree); "" when unknown
 }
 
 // RecordApproval records an approval or rejection and its audit event. It is
@@ -42,22 +42,10 @@ func (s *Store) RecordApproval(r ApprovalRequest) (int64, error) {
 		r.Kind = "code_review"
 	}
 	if r.Decision == "approved" {
-		viaToken, err := s.authorize(r.Token)
-		if err != nil {
+		if err := s.requirePerson(r.Token, ErrAgentCannotApprove); err != nil {
 			return 0, err
 		}
-		if !viaToken && s.Actor.Type == "agent" {
-			return 0, ErrAgentCannotApprove
-		}
 	}
-	id, err := s.AddApprovalWithRole(r.TaskID, r.RoleID, r.Kind, r.By, r.Decision, r.Note)
-	if err != nil {
-		return 0, err
-	}
-	if r.Decision == "approved" {
-		s.LogTaskEvent(r.TaskID, "approval", fmt.Sprintf("approved (%s)", r.Kind))
-	} else {
-		s.LogTaskEvent(r.TaskID, "approval", "rejected at review: "+scrubText(r.Note))
-	}
-	return id, nil
+	// addApproval records the row, its seal and its approval event together.
+	return s.addApproval(r.TaskID, r.RoleID, r.Kind, r.By, r.Decision, r.Note, r.TreeHash)
 }

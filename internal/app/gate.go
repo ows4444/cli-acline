@@ -19,6 +19,9 @@ type ApproveRequest struct {
 	RoleArg          string
 	ProjectArg       string
 	AllowCwdFallback bool
+	// Tree is the fingerprint of the code being approved (TaskTree); the gate
+	// asks for a new approval once the code differs from it.
+	Tree string
 }
 
 // Approve resolves the request's role scope, then records approval. Returns
@@ -32,7 +35,7 @@ func Approve(st *store.Store, req ApproveRequest) (int64, error) {
 	}
 	return st.RecordApproval(store.ApprovalRequest{
 		TaskID: req.TaskID, RoleID: roleID, Kind: req.Kind, Decision: "approved",
-		By: req.By, Note: req.Note, Token: req.Token,
+		By: req.By, Note: req.Note, Token: req.Token, TreeHash: req.Tree,
 	})
 }
 

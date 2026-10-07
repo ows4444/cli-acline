@@ -109,6 +109,14 @@ type projectResolveOut struct {
 }
 
 func registerDashboardTools(s *sdkmcp.Server, st *store.Store) {
+	addDashboardTool(s, st)
+	addMetricsTool(s, st)
+	addVerifyTool(s, st)
+	addProjectListTool(s, st)
+	addProjectResolveTool(s, st)
+}
+
+func addDashboardTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_dashboard",
 		Description: "Bootstrap view for a new session: active session, open tasks needing attention, approved specs, accepted decisions, memory, and pending-review nudges. Same view `acline dashboard` prints.",
@@ -152,7 +160,9 @@ func registerDashboardTools(s *sdkmcp.Server, st *store.Store) {
 
 		return textResult(fmt.Sprintf("%d open task(s), %d needing attention", out.TasksTotal, len(out.TasksNeedingAttention))), out, nil
 	})
+}
 
+func addMetricsTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_metrics",
 		Description: "Verification-tax view: what was produced (tasks, sessions) and what checking it took (checks, failures, approvals, overrides, rework, policy violations, guard denials, token/cost totals).",
@@ -175,7 +185,9 @@ func registerDashboardTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d tasks total (%d done), %d checks (%d failed)", out.TasksTotal, out.TasksDone, out.ChecksTotal, out.ChecksFailed)), out, nil
 	})
+}
 
+func addVerifyTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_verify",
 		Description: "Verify the audit trail's hash chain is intact -- detects edits, deletions, or insertions made outside normal recording, including direct writes to the database file.",
@@ -203,7 +215,9 @@ func registerDashboardTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("audit trail intact: %d event(s), %d sealed record(s) verified", r.Checked, rec.Checked)), out, nil
 	})
+}
 
+func addProjectListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_project_list",
 		Description: "List registered projects (name, path, default autonomy).",
@@ -218,7 +232,9 @@ func registerDashboardTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d project(s) registered", len(projects))), out, nil
 	})
+}
 
+func addProjectResolveTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_project_resolve",
 		Description: "Resolve a filesystem path to its registered project, the same way the CLI resolves its " +

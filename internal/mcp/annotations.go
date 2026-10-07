@@ -18,8 +18,8 @@ import (
 // to the store.
 var destructiveTools = map[string]bool{
 	"acline_memory_forget": true, "acline_memory_reject": true, "acline_decision_reject": true,
-	"acline_decision_supersede": true, "acline_plan_reject": true, "acline_reject": true,
-	"acline_task_done": true, "acline_session_end": true,
+	"acline_decision_supersede": true, "acline_decision_deprecate": true, "acline_spec_supersede": true,
+	"acline_plan_reject": true, "acline_plan_revise": true, "acline_reject": true, "acline_task_done": true, "acline_session_end": true,
 }
 
 // idempotentTools have no further effect when repeated with the same arguments.
@@ -67,8 +67,9 @@ var registeredTools sync.Map
 // the capture toolset leaves them out so an agent client is not offered them.
 var decisionTools = map[string]bool{
 	"acline_approve": true, "acline_reject": true, "acline_decision_accept": true, "acline_decision_reject": true,
-	"acline_decision_supersede": true, "acline_spec_approve": true, "acline_plan_approve": true, "acline_plan_reject": true,
-	"acline_memory_approve": true, "acline_memory_reject": true, "acline_memory_forget": true, "acline_dep_verify": true,
+	"acline_decision_supersede": true, "acline_decision_deprecate": true, "acline_spec_supersede": true,
+	"acline_spec_approve": true, "acline_plan_approve": true, "acline_plan_reject": true,
+	"acline_memory_approve": true, "acline_memory_reject": true, "acline_memory_forget": true, "acline_memory_touch": true, "acline_dep_verify": true,
 	"acline_role_add": true,
 }
 

@@ -47,7 +47,8 @@ func TestAnAgentMayStillCompleteATaskWhoseGateIsSatisfiedWithoutForce(t *testing
 	h := humanStore(t)
 	id, _ := h.AddTask("easy", "", "normal", TaskOpts{})
 	a := asAgent(h)
-	if _, err := a.AddCheck(id, "test", "pass", ""); err != nil {
+	// What an agent can do: record a check acline ran (its typed pass never counts).
+	if _, err := a.AddCheckWithMeta(id, nil, "test", "pass", "", "", CheckMeta{Source: CheckSourceRunner}); err != nil {
 		t.Fatal(err)
 	}
 	if res, err := a.CompleteTask(id, false, ""); err != nil || res.Overridden {
@@ -55,7 +56,7 @@ func TestAnAgentMayStillCompleteATaskWhoseGateIsSatisfiedWithoutForce(t *testing
 	}
 	// and --force on an already-satisfied gate is not an override, so it needs nothing special
 	id2, _ := h.AddTask("easy2", "", "normal", TaskOpts{})
-	a.AddCheck(id2, "test", "pass", "")
+	a.AddCheckWithMeta(id2, nil, "test", "pass", "", "", CheckMeta{Source: CheckSourceRunner})
 	if res, err := a.CompleteTask(id2, true, ""); err != nil || res.Overridden {
 		t.Fatalf("force on a satisfied gate = %+v, %v", res, err)
 	}

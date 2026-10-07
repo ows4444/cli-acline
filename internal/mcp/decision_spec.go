@@ -6,7 +6,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"acline/internal/redact"
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -51,10 +51,30 @@ type decisionAddArgs struct {
 }
 
 type decisionAddOut struct {
-	ID int64 `json:"id"`
+	ID              int64 `json:"id"`
+	SecretsRedacted bool  `json:"secrets_redacted,omitempty"`
+}
+
+// recordedSummary is the text result for a new spec, decision or memory entry,
+// saying when a pasted secret was redacted from it.
+func recordedSummary(kind string, res app.RecordResult) string {
+	summary := fmt.Sprintf("%s #%d recorded", kind, res.ID)
+	if res.Redacted {
+		summary += " (a pasted secret value was redacted before recording)"
+	}
+	return summary
 }
 
 func registerDecisionTools(s *sdkmcp.Server, st *store.Store) {
+	addDecisionListTool(s, st)
+	addDecisionAddTool(s, st)
+	addDecisionAcceptTool(s, st)
+	addDecisionRejectTool(s, st)
+	addDecisionSupersedeTool(s, st)
+	addDecisionDeprecateTool(s, st)
+}
+
+func addDecisionListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_decision_list",
 		Description: "List ADR-style decisions, optionally filtered by status or project.",
@@ -74,32 +94,25 @@ func registerDecisionTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d decision(s)", len(page))), out, nil
 	})
+}
 
+func addDecisionAddTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_decision_add",
 		Description: "Record a durable/expensive-to-reverse decision (ADR-style). Lands as status=proposed.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args decisionAddArgs) (*sdkmcp.CallToolResult, decisionAddOut, error) {
-		if args.Title == "" {
-			return nil, decisionAddOut{}, fmt.Errorf("title is required")
-		}
-		secretFound := redact.Fields(&args.Title, &args.Context, &args.Decision, &args.Rationale)
-		projectID, err := resolveProject(st, args.Project)
-		if err != nil {
-			return nil, decisionAddOut{}, err
-		}
-		id, err := st.AddDecision(args.Title, store.DecisionOpts{
-			Scope: args.Scope, Context: args.Context, Decision: args.Decision, Rationale: args.Rationale, ProjectID: projectID,
+		res, err := app.AddDecision(st, app.AddDecisionRequest{
+			Title: args.Title, Scope: args.Scope, Context: args.Context, Decision: args.Decision,
+			Rationale: args.Rationale, ProjectArg: args.Project,
 		})
 		if err != nil {
 			return nil, decisionAddOut{}, err
 		}
-		st.LogEventGlobal("decision_recorded", fmt.Sprintf("decision #%d recorded", id))
-		if secretFound {
-			st.LogEventGlobal("secret_redacted", fmt.Sprintf("decision #%d: a pasted secret value was redacted before recording", id))
-		}
-		return textResult(fmt.Sprintf("decision #%d recorded", id)), decisionAddOut{ID: id}, nil
+		return textResult(recordedSummary("decision", res)), decisionAddOut{ID: res.ID, SecretsRedacted: res.Redacted}, nil
 	})
+}
 
+func addDecisionAcceptTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_decision_accept",
 		Description: "Mark a decision accepted (later work is checked against it). A person's decision: refused unless an approval token " +
@@ -113,7 +126,9 @@ func registerDecisionTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("decision #%d accepted", args.ID)), idOut{ID: args.ID}, nil
 	})
+}
 
+func addDecisionRejectTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_decision_reject",
 		Description: "Mark a decision rejected. Rejecting an accepted decision is a person's decision: refused unless an " +
@@ -127,7 +142,9 @@ func registerDecisionTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("decision #%d rejected", args.ID)), idOut{ID: args.ID}, nil
 	})
+}
 
+func addDecisionSupersedeTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_decision_supersede",
 		Description: "Mark old_id superseded by new_id. Superseding an accepted decision is a person's decision: refused unless an " +
@@ -218,21 +235,23 @@ type decisionSupersedeOut struct {
 }
 
 type specOut struct {
-	ID        int64   `json:"id"`
-	Title     string  `json:"title"`
-	Body      *string `json:"body,omitempty"`
-	Status    string  `json:"status"`
-	Version   int     `json:"version"`
-	ProjectID *int64  `json:"project_id,omitempty"`
-	CreatedAt string  `json:"created_at"`
+	ID           int64   `json:"id"`
+	Title        string  `json:"title"`
+	Body         *string `json:"body,omitempty"`
+	Status       string  `json:"status"`
+	Version      int     `json:"version"`
+	SupersededBy *int64  `json:"superseded_by,omitempty"`
+	ProjectID    *int64  `json:"project_id,omitempty"`
+	CreatedAt    string  `json:"created_at"`
 }
 
 func toSpecOut(sp store.Spec) specOut {
-	return specOut{ID: sp.ID, Title: sp.Title, Body: nullStrPtr(sp.Body), Status: sp.Status, Version: sp.Version, ProjectID: nullIntPtr(sp.ProjectID), CreatedAt: sp.CreatedAt}
+	return specOut{ID: sp.ID, Title: sp.Title, Body: nullStrPtr(sp.Body), Status: sp.Status, Version: sp.Version,
+		SupersededBy: nullIntPtr(sp.SupersededBy), ProjectID: nullIntPtr(sp.ProjectID), CreatedAt: sp.CreatedAt}
 }
 
 type specListArgs struct {
-	Status  string `json:"status,omitempty" jsonschema:"draft|approved|implemented|superseded"`
+	Status  string `json:"status,omitempty" jsonschema:"draft|approved|superseded"`
 	Project string `json:"project,omitempty" jsonschema:"restrict to a project name"`
 	Limit   int    `json:"limit,omitempty" jsonschema:"max results (default 100, capped at 500)"`
 	Offset  int    `json:"offset,omitempty" jsonschema:"skip this many results (for paging)"`
@@ -250,10 +269,19 @@ type specAddArgs struct {
 }
 
 type specAddOut struct {
-	ID int64 `json:"id"`
+	ID              int64 `json:"id"`
+	SecretsRedacted bool  `json:"secrets_redacted,omitempty"`
 }
 
 func registerSpecTools(s *sdkmcp.Server, st *store.Store) {
+	addSpecListTool(s, st)
+	addSpecAddTool(s, st)
+	addSpecApproveTool(s, st)
+	addSpecReviseTool(s, st)
+	addSpecSupersedeTool(s, st)
+}
+
+func addSpecListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_spec_list",
 		Description: "List versioned intent specs that tasks are derived from, optionally filtered by status or project.",
@@ -273,30 +301,22 @@ func registerSpecTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d spec(s)", len(page))), out, nil
 	})
+}
 
+func addSpecAddTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_spec_add",
 		Description: "Add a spec (versioned statement of intent), for non-trivial work a task should derive from. Lands as status=draft.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args specAddArgs) (*sdkmcp.CallToolResult, specAddOut, error) {
-		if args.Title == "" {
-			return nil, specAddOut{}, fmt.Errorf("title is required")
-		}
-		secretFound := redact.Fields(&args.Title, &args.Body)
-		projectID, err := resolveProject(st, args.Project)
+		res, err := app.AddSpec(st, app.AddSpecRequest{Title: args.Title, Body: args.Body, ProjectArg: args.Project})
 		if err != nil {
 			return nil, specAddOut{}, err
 		}
-		id, err := st.AddSpec(args.Title, args.Body, store.SpecOpts{ProjectID: projectID})
-		if err != nil {
-			return nil, specAddOut{}, err
-		}
-		st.LogEventGlobal("spec_recorded", fmt.Sprintf("spec #%d recorded", id))
-		if secretFound {
-			st.LogEventGlobal("secret_redacted", fmt.Sprintf("spec #%d: a pasted secret value was redacted before recording", id))
-		}
-		return textResult(fmt.Sprintf("spec #%d recorded", id)), specAddOut{ID: id}, nil
+		return textResult(recordedSummary("spec", res)), specAddOut{ID: res.ID, SecretsRedacted: res.Redacted}, nil
 	})
+}
 
+func addSpecApproveTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_spec_approve",
 		Description: "Mark a spec approved (ready to derive a plan or tasks from). A person's decision: refused unless an approval token " +
@@ -310,23 +330,25 @@ func registerSpecTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("spec #%d approved", args.ID)), idOut{ID: args.ID}, nil
 	})
+}
 
+func addSpecReviseTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_spec_revise",
 		Description: "Replace a spec's body and bump its version. Revising an approved spec withdraws its approval (it becomes a draft and needs approving again); the earlier text is kept.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args specReviseArgs) (*sdkmcp.CallToolResult, specReviseOut, error) {
-		if args.Body == "" {
-			return nil, specReviseOut{}, fmt.Errorf("body is required")
-		}
-		secretFound := redact.Fields(&args.Body)
-		version, err := st.ReviseSpec(args.ID, args.Body)
+		res, err := app.ReviseSpec(st, args.ID, args.Body)
 		if err != nil {
 			return nil, specReviseOut{}, err
 		}
-		if secretFound {
-			st.LogEventGlobal("secret_redacted", fmt.Sprintf("spec #%d: a pasted secret value was redacted before recording", args.ID))
+		msg := fmt.Sprintf("spec #%d revised to v%d", args.ID, res.Version)
+		if res.ApprovalWithdrawn {
+			msg += "; its approval was withdrawn, so it is a draft again"
 		}
-		return textResult(fmt.Sprintf("spec #%d revised to v%d", args.ID, version)), specReviseOut{ID: args.ID, Version: version}, nil
+		if res.Redacted {
+			msg += " (a pasted secret value was redacted before recording)"
+		}
+		return textResult(msg), specReviseOut{ID: args.ID, Version: res.Version, SecretsRedacted: res.Redacted, ApprovalWithdrawn: res.ApprovalWithdrawn}, nil
 	})
 }
 
@@ -336,6 +358,60 @@ type specReviseArgs struct {
 }
 
 type specReviseOut struct {
-	ID      int64 `json:"id"`
-	Version int   `json:"version"`
+	ID                int64 `json:"id"`
+	Version           int   `json:"version"`
+	SecretsRedacted   bool  `json:"secrets_redacted,omitempty"`
+	ApprovalWithdrawn bool  `json:"approval_withdrawn,omitempty"`
+}
+
+func addDecisionDeprecateTool(s *sdkmcp.Server, st *store.Store) {
+	addTool(s, &sdkmcp.Tool{
+		Name: "acline_decision_deprecate",
+		Description: "Mark an accepted decision deprecated: it no longer applies and nothing replaces it (use acline_decision_supersede " +
+			"when something does). Only an accepted decision can be deprecated, so this is always a person's decision: refused unless " +
+			"an approval token is enabled and presented, like acline_decision_accept.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args decisionRetireArgs) (*sdkmcp.CallToolResult, idOut, error) {
+		if err := requireTokenToRetire(st, args.ID, "deprecating a decision over MCP", "acline decision deprecate"); err != nil {
+			return nil, idOut{}, err
+		}
+		if err := st.DeprecateDecision(args.ID, args.Token); err != nil {
+			return nil, idOut{}, err
+		}
+		return textResult(fmt.Sprintf("decision #%d deprecated", args.ID)), idOut{ID: args.ID}, nil
+	})
+}
+
+type specSupersedeArgs struct {
+	OldID int64  `json:"old_id" jsonschema:"the spec being superseded"`
+	NewID int64  `json:"new_id" jsonschema:"the spec that supersedes it"`
+	Token string `json:"token,omitempty" jsonschema:"human approval token; required when old_id is approved. Never read from the server's environment."`
+}
+
+type specSupersedeOut struct {
+	OldID int64 `json:"old_id"`
+	NewID int64 `json:"new_id"`
+}
+
+func addSpecSupersedeTool(s *sdkmcp.Server, st *store.Store) {
+	addTool(s, &sdkmcp.Tool{
+		Name: "acline_spec_supersede",
+		Description: "Mark spec old_id superseded by new_id; a superseded spec cannot be approved or revised again. Superseding an " +
+			"approved spec is a person's decision: refused unless an approval token is enabled and presented, like acline_spec_approve. " +
+			"A draft can be superseded freely.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args specSupersedeArgs) (*sdkmcp.CallToolResult, specSupersedeOut, error) {
+		old, err := st.GetSpec(args.OldID)
+		if err != nil {
+			return nil, specSupersedeOut{}, err
+		}
+		if old.Status == "approved" {
+			if err := requireApprovalTokenEnabled(st, "superseding an approved spec over MCP", "acline spec supersede"); err != nil {
+				return nil, specSupersedeOut{}, err
+			}
+		}
+		if err := st.SupersedeSpec(args.OldID, args.NewID, args.Token); err != nil {
+			return nil, specSupersedeOut{}, err
+		}
+		return textResult(fmt.Sprintf("spec #%d superseded by #%d", args.OldID, args.NewID)),
+			specSupersedeOut{OldID: args.OldID, NewID: args.NewID}, nil
+	})
 }

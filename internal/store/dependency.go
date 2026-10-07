@@ -3,6 +3,7 @@ package store
 import (
 	"database/sql"
 	"errors"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -40,15 +41,24 @@ func (s *Store) AddDependencyWithToken(taskID, projectID *int64, ecosystem, name
 		}
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
-		`INSERT INTO dependencies (task_id, project_id, ecosystem, name, version, verified, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		nullInt(taskID), nullInt(projectID), ecosystem, name, nullStr(version), verified, now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	var id int64
+	err := s.writeWithEvent(taskID, "dependency_added", func(tx *sql.Tx) (string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO dependencies (task_id, project_id, ecosystem, name, version, verified, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			nullInt(taskID), nullInt(projectID), ecosystem, name, nullStr(version), verified, now,
+		)
+		if err != nil {
+			return "", err
+		}
+		id, err = res.LastInsertId()
+		msg := fmt.Sprintf("dependency #%d %s %s@%s", id, ecosystem, name, version)
+		if verified {
+			msg += " (verified)"
+		}
+		return msg, err
+	})
+	return id, err
 }
 
 func (s *Store) VerifyDependency(id int64) error {
@@ -62,11 +72,17 @@ func (s *Store) VerifyDependencyWithToken(id int64, token string) error {
 	if err := s.requirePerson(token, ErrAgentCannotVerifyDependency); err != nil {
 		return err
 	}
-	res, err := s.DB.Exec(`UPDATE dependencies SET verified = 1 WHERE id = ?`, id)
+	var taskID sql.NullInt64
+	var label string
+	err := s.DB.QueryRow(`SELECT task_id, ecosystem || ' ' || name || '@' || COALESCE(version, '') FROM dependencies WHERE id = ?`, id).Scan(&taskID, &label)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("dependency #%d: %w", id, ErrNotFound)
+	}
 	if err != nil {
 		return err
 	}
-	return mustExist(res, "dependency", id)
+	return s.changeTaskWithEvent("dependency", id, nullIntPtr(taskID), "dependency_verified",
+		fmt.Sprintf("dependency #%d %s verified", id, label), `UPDATE dependencies SET verified = 1 WHERE id = ?`, id)
 }
 
 // ListDependencies returns dependencies, optionally scoped to a project and/or

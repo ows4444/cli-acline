@@ -12,13 +12,12 @@ import (
 
 // stopFixture is a store with an active session on one task, and the working
 // tree's fingerprint pinned to tree.
-func stopFixture(t *testing.T, tree string) (*store.Store, int64) {
+func stopFixture(t *testing.T, tree string) (*cli, *store.Store, int64) {
 	t.Helper()
 	t.Setenv("ACLINE_PROJECT", "")
-	s := withTestStore(t)
-	prev := stopTree
-	stopTree = func() string { return tree }
-	t.Cleanup(func() { stopTree = prev })
+	c := newTestCLI(t)
+	s := c.st
+	c.stopTree = func() string { return tree }
 	taskID, err := s.AddTask("stop hook task", "", "normal", store.TaskOpts{})
 	if err != nil {
 		t.Fatal(err)
@@ -26,13 +25,13 @@ func stopFixture(t *testing.T, tree string) (*store.Store, int64) {
 	if _, err := s.StartSession(&taskID, nil, nil, ""); err != nil {
 		t.Fatal(err)
 	}
-	return s, taskID
+	return c, s, taskID
 }
 
-func runStopFor(t *testing.T, payload string) string {
+func runStopFor(t *testing.T, c *cli, payload string) string {
 	t.Helper()
 	var out bytes.Buffer
-	if err := runStop(strings.NewReader(payload), &out, t.TempDir()); err != nil {
+	if err := c.runStop(strings.NewReader(payload), &out, t.TempDir()); err != nil {
 		t.Fatal(err)
 	}
 	return out.String()
@@ -47,11 +46,11 @@ func addRunnerCheck(t *testing.T, s *store.Store, taskID int64, kind, status, tr
 }
 
 func TestStopBlocksWhenPassingChecksPredateTheLastEdit(t *testing.T) {
-	s, taskID := stopFixture(t, "sha256:new")
+	c, s, taskID := stopFixture(t, "sha256:new")
 	addRunnerCheck(t, s, taskID, "test", "pass", "sha256:old")
 	addRunnerCheck(t, s, taskID, "lint", "pass", "sha256:old")
 
-	out := runStopFor(t, `{"session_id":"s1"}`)
+	out := runStopFor(t, c, `{"session_id":"s1"}`)
 	var got struct {
 		Decision string `json:"decision"`
 		Reason   string `json:"reason"`
@@ -100,11 +99,11 @@ func TestStopLetsTheTurnEnd(t *testing.T) {
 			}
 		}},
 	}
-	for _, c := range cases {
-		t.Run(c.name, func(t *testing.T) {
-			s, taskID := stopFixture(t, "sha256:new")
-			c.setup(t, s, taskID)
-			if out := runStopFor(t, c.payload); out != "" {
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			c, s, taskID := stopFixture(t, "sha256:new")
+			tc.setup(t, s, taskID)
+			if out := runStopFor(t, c, tc.payload); out != "" {
 				t.Fatalf("blocked: %q", out)
 			}
 		})
@@ -112,7 +111,7 @@ func TestStopLetsTheTurnEnd(t *testing.T) {
 }
 
 func TestStopIgnoresAnotherProjectsSession(t *testing.T) {
-	s, _ := stopFixture(t, "sha256:new")
+	c, s, _ := stopFixture(t, "sha256:new")
 	if _, err := s.EndSession("", store.SessionCost{}); err != nil {
 		t.Fatal(err)
 	}
@@ -128,28 +127,26 @@ func TestStopIgnoresAnotherProjectsSession(t *testing.T) {
 		t.Fatal(err)
 	}
 	addRunnerCheck(t, s, taskID, "test", "pass", "sha256:old")
-	if out := runStopFor(t, `{}`); out != "" {
+	if out := runStopFor(t, c, `{}`); out != "" {
 		t.Fatalf("blocked on another project's session: %q", out)
 	}
 }
 
 func TestStopFailsOpenWhenTheTreeHashIsSlow(t *testing.T) {
-	s, taskID := stopFixture(t, "sha256:new")
+	c, s, taskID := stopFixture(t, "sha256:new")
 	addRunnerCheck(t, s, taskID, "test", "pass", "sha256:old")
-	stopTree = func() string { time.Sleep(time.Second); return "sha256:new" }
-	prev := stopTreeTimeout
-	stopTreeTimeout = 10 * time.Millisecond
-	t.Cleanup(func() { stopTreeTimeout = prev })
-	if out := runStopFor(t, `{}`); out != "" {
+	c.stopTree = func() string { time.Sleep(time.Second); return "sha256:new" }
+	c.stopTreeTimeout = 10 * time.Millisecond
+	if out := runStopFor(t, c, `{}`); out != "" {
 		t.Fatalf("blocked without a tree hash: %q", out)
 	}
 }
 
 func TestStopRecordsTheTurnsMemoryLogLines(t *testing.T) {
-	stopFixture(t, "sha256:new")
-	calls := fakeSelf(t, func([]string) (string, error) { return "", nil })
+	c, _, _ := stopFixture(t, "sha256:new")
+	calls := fakeSelf(t, c, func([]string) (string, error) { return "", nil })
 	transcript := writeTranscript(t, assistantEntry("MEMORY_LOG: stop captures this"))
-	runStopFor(t, `{"session_id":"s1","transcript_path":"`+transcript+`"}`)
+	runStopFor(t, c, `{"session_id":"s1","transcript_path":"`+transcript+`"}`)
 	if len(*calls) != 1 || (*calls)[0].args[2] != "stop captures this" {
 		t.Fatalf("calls = %+v", *calls)
 	}

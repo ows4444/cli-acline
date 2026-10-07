@@ -22,7 +22,7 @@ acline dashboard
 | Note (promote later via `/reflect`) | `acline note add "..."` |
 | Audit event (history only, never reaches `/reflect`) | `acline log "..." --type decision\|bug\|commit\|blocker --task <id>` |
 | Criteria (EARS: `When X, the system shall Y`) | `acline task criteria add <id> "..."` |
-| Verify | `acline check record <id> --kind test\|sast\|sca\|lint\|human_review\|eval --status pass\|fail` |
+| Verify | `acline check run <id> --kind test\|sast\|sca\|lint` (runs the tool; an agent's typed pass never counts). `acline check record` is only for results no tool produces (`--kind eval`; `human_review` is a person's) |
 | Approve (risk=high/critical or autonomy=hitl) | `acline approve <id> --by <person>` (agents cannot self-approve) |
 | Complete | `acline task done <id>` |
 | Dependency added | `acline dep add <ecosystem> <name>@<version> --task <id>` |

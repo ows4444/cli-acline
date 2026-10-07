@@ -40,15 +40,20 @@ func (s *Store) AddEval(taskID, projectID *int64, suite string, passRate float64
 	if sampleSize > 0 {
 		size = sampleSize
 	}
-	res, err := s.DB.Exec(
-		`INSERT INTO evals (task_id, project_id, suite, pass_rate, sample_size, note, actor_type, actor_id, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		nullInt(taskID), nullInt(projectID), suite, passRate, size, nullStr(note), s.Actor.Type, s.Actor.ID, now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	var id int64
+	err := s.writeWithEvent(taskID, "eval_recorded", func(tx *sql.Tx) (string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO evals (task_id, project_id, suite, pass_rate, sample_size, note, actor_type, actor_id, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			nullInt(taskID), nullInt(projectID), suite, passRate, size, nullStr(note), s.Actor.Type, s.Actor.ID, now,
+		)
+		if err != nil {
+			return "", err
+		}
+		id, err = res.LastInsertId()
+		return fmt.Sprintf("eval #%d: suite %s at %.1f%%", id, suite, passRate*100), err
+	})
+	return id, err
 }
 
 // ListEvals returns recorded evals, optionally scoped to a project and/or a
@@ -91,9 +96,8 @@ func (s *Store) ListEvals(projectID *int64, suite string, limit int) ([]Eval, er
 	return out, rows.Err()
 }
 
-// LatestEval returns the most recent eval for a suite, unscoped by
-// project — autonomy promotion (PromoteAutonomy below) judges a suite's
-// accuracy on its own merits regardless of which project last ran it.
+// LatestEval returns the most recent eval for a suite in any project (for
+// display). PromoteAutonomy uses latestEvalIn, scoped to the task's project.
 func (s *Store) LatestEval(suite string) (*Eval, error) {
 	evals, err := s.ListEvals(nil, suite, 1)
 	if err != nil {
@@ -126,7 +130,11 @@ func (s *Store) PromoteAutonomy(taskID int64, to, suite string, threshold float6
 	if agent && threshold < DefaultPromotionThreshold {
 		return fmt.Errorf("%w: the threshold cannot go below %.0f%%", ErrAgentCannotSelfPromote, DefaultPromotionThreshold*100)
 	}
-	e, err := s.LatestEval(suite)
+	task, err := s.GetTask(taskID)
+	if err != nil {
+		return err
+	}
+	e, err := s.latestEvalIn(suite, nullIntPtr(task.ProjectID))
 	if err != nil {
 		return fmt.Errorf("cannot promote without measured accuracy: %w", err)
 	}
@@ -138,19 +146,29 @@ func (s *Store) PromoteAutonomy(taskID int64, to, suite string, threshold float6
 			suite, e.PassRate*100, threshold*100, to)
 	}
 	// Not UpdateTaskAutonomy: the measured eval above is what authorizes this
-	// change, so it must not also demand a person. It logs its own event.
-	if _, err := s.GetTask(taskID); err != nil {
-		return err
+	// change, so it must not also demand a person. The change and its event are
+	// written in one transaction.
+	return s.changeTaskWithEvent("task", taskID, &taskID, "autonomy_promoted",
+		fmt.Sprintf("autonomy %s -> %s (suite %s at %.1f%%, eval #%d)", task.Autonomy, to, suite, e.PassRate*100, e.ID),
+		`UPDATE tasks SET autonomy = ?, updated_at = ? WHERE id = ?`, to, time.Now().UTC().Format(time.RFC3339), taskID)
+}
+
+// latestEvalIn is the newest eval of suite that belongs to projectID (nil: to
+// no project): recorded for that project, or for one of its tasks. A promotion
+// must rest on a measurement of the same project's work; the newest of the suite
+// anywhere in the shared store let one project's score promote another's task.
+func (s *Store) latestEvalIn(suite string, projectID *int64) (*Eval, error) {
+	var e Eval
+	err := s.DB.QueryRow(`SELECT id, task_id, project_id, suite, pass_rate, sample_size, note, actor_type, actor_id, created_at
+		FROM evals WHERE suite = ?
+		AND COALESCE(project_id, (SELECT t.project_id FROM tasks t WHERE t.id = evals.task_id)) IS ?
+		ORDER BY id DESC LIMIT 1`, suite, nullInt64Arg(nullInt(projectID))).Scan(
+		&e.ID, &e.TaskID, &e.ProjectID, &e.Suite, &e.PassRate, &e.SampleSize, &e.Note, &e.ActorType, &e.ActorID, &e.CreatedAt)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, fmt.Errorf("no eval recorded for suite %q in this task's project", suite)
 	}
-	res, err := s.DB.Exec(`UPDATE tasks SET autonomy = ?, updated_at = ? WHERE id = ?`,
-		to, time.Now().UTC().Format(time.RFC3339), taskID)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := mustExist(res, "task", taskID); err != nil {
-		return err
-	}
-	_, err = s.LogEvent(&taskID, nil, "autonomy_promoted",
-		fmt.Sprintf("autonomy -> %s (suite %s at %.1f%%)", to, suite, e.PassRate*100))
-	return err
+	return &e, nil
 }

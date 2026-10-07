@@ -68,6 +68,26 @@ func classifyError(err error) string {
 		return "agent_cannot_approve"
 	case errors.Is(err, store.ErrAgentCannotReview):
 		return "agent_cannot_review"
+	case errors.Is(err, store.ErrAgentCannotRetireMemory):
+		return "agent_cannot_retire_memory"
+	case errors.Is(err, store.ErrAgentCannotAcceptDecision):
+		return "agent_cannot_accept_decision"
+	case errors.Is(err, store.ErrAgentCannotRetireDecision):
+		return "agent_cannot_retire_decision"
+	case errors.Is(err, store.ErrAgentCannotApproveSpec):
+		return "agent_cannot_approve_spec"
+	case errors.Is(err, store.ErrAgentCannotRetireSpec):
+		return "agent_cannot_retire_spec"
+	case errors.Is(err, store.ErrAgentCannotDecidePlan):
+		return "agent_cannot_decide_plan"
+	case errors.Is(err, store.ErrAgentCannotConfigureRunner):
+		return "agent_cannot_configure_runner"
+	case errors.Is(err, store.ErrAgentCannotSelfPromote):
+		return "agent_cannot_self_promote"
+	case errors.Is(err, store.ErrAgentCannotReseal):
+		return "agent_cannot_reseal"
+	case errors.Is(err, store.ErrNotAUserLogType):
+		return "invalid_log_type"
 	case errors.Is(err, store.ErrAgentCannotLoosenTask):
 		return "agent_cannot_loosen_task"
 	case errors.Is(err, store.ErrAgentCannotOverrideGate):
@@ -102,6 +122,8 @@ func classifyError(err error) string {
 		return "status_needs_gate"
 	case errors.Is(err, store.ErrNotFound), errors.Is(err, store.ErrProjectNotFound):
 		return "not_found"
+	case errors.Is(err, store.ErrInvalidTransition):
+		return "invalid_transition"
 	case isBusy(err):
 		return "busy"
 	default:

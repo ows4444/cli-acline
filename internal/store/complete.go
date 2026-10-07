@@ -72,6 +72,11 @@ var afterGateEvaluated func()
 // tryComplete is one attempt of CompleteTaskForTree. done=false means the gate's
 // inputs changed while it was evaluated and nothing was written.
 func (s *Store) tryComplete(id int64, force bool, token, currentTree string) (res CompleteResult, done bool, err error) {
+	// A done task is not completed again (and its gate is not evaluated, nor
+	// overridden, for nothing); updateTaskStatus re-checks under the lock.
+	if err := checkTransition(s.DB, "task", id, "done"); err != nil {
+		return res, true, err
+	}
 	before, err := gateInputs(s.DB, id)
 	if err != nil {
 		return res, false, err
@@ -119,7 +124,7 @@ func (s *Store) tryComplete(id int64, force bool, token, currentTree string) (re
 
 	if res.Overridden {
 		reason := strings.Join(gate.Blockers, "; ")
-		if _, err := s.insertApproval(tx, sessionID, id, nil, "override", "", "overridden", scrubText(reason)); err != nil {
+		if _, err := s.insertApproval(tx, sessionID, id, nil, "override", "", "overridden", scrubText(reason), currentTree); err != nil {
 			return res, true, err
 		}
 		if _, err := s.logEventTx(tx, &id, sessionID, nil, "override", "gate overridden: "+reason); err != nil {

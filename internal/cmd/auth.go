@@ -32,7 +32,8 @@ type terminal interface {
 	io.ReadWriteCloser
 }
 
-var openTerminal = func() (terminal, error) {
+// openTTY opens the controlling terminal.
+func openTTY() (terminal, error) {
 	return os.OpenFile("/dev/tty", os.O_RDWR, 0)
 }
 
@@ -79,12 +80,12 @@ func hideInput(tty *os.File) func() {
 // unset). Only if the store says a token is *required* and none was given does
 // it prompt on the terminal and retry -- so nothing prompts unless it must, and
 // an agent with no terminal just gets the store's "token required" error.
-func withApprovalToken(action string, fn func(token string) error) error {
+func (c *cli) withApprovalToken(action string, fn func(token string) error) error {
 	err := fn(os.Getenv(approvalTokenEnv))
 	if !errors.Is(err, store.ErrApprovalTokenRequired) {
 		return err
 	}
-	tty, terr := openTerminal()
+	tty, terr := c.openTerminal()
 	if terr != nil {
 		return err
 	}
@@ -96,47 +97,57 @@ func withApprovalToken(action string, fn func(token string) error) error {
 	return fn(token)
 }
 
-var authCmd = &cobra.Command{
-	Use:   "auth",
-	Short: "Manage the human approval token that gates approvals and --force",
-	Long: "When an approval token is enabled, approving a task, overriding the completion gate with --force, and " +
-		"approving agent-written memory all require it. Until a human enables it, none of that changes.\n\n" +
-		"The token is a secret only you hold: an agent that runs `acline` in your shell can flip identity " +
-		"environment variables, but it cannot supply a token it was never given. Don't export " +
-		approvalTokenEnv + " into the shell an agent runs in; let acline prompt you on the terminal instead.",
+func newAuthCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "auth",
+		Short: "Manage the human approval token that gates approvals and --force",
+		Long: "When an approval token is enabled, approving a task, overriding the completion gate with --force, and " +
+			"approving agent-written memory all require it. Until a human enables it, none of that changes.\n\n" +
+			"The token is a secret only you hold: an agent that runs `acline` in your shell can flip identity " +
+			"environment variables, but it cannot supply a token it was never given. Don't export " +
+			approvalTokenEnv + " into the shell an agent runs in; let acline prompt you on the terminal instead.",
+	}
+	cmd.AddCommand(newAuthStatusCmd(c), newAuthInitCmd(c), newAuthRotateCmd(c), newAuthDisableCmd(c))
+	return cmd
 }
 
-var authStatusCmd = &cobra.Command{
-	Use:   "status",
-	Short: "Show whether an approval token is enabled",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		enabled, err := st.ApprovalTokenEnabled()
-		if err != nil {
-			return err
-		}
-		if enabled {
-			fmt.Println("approval token: ENABLED (approve, task done --force and memory approve require it)")
-		} else {
-			fmt.Println("approval token: not enabled — identity is self-declared via ACLINE_ACTOR_TYPE; run `acline auth init` in a terminal to enforce it")
-		}
-		return nil
-	},
+func newAuthStatusCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "status",
+		Short: "Show whether an approval token is enabled",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			enabled, err := c.st.ApprovalTokenEnabled()
+			if err != nil {
+				return err
+			}
+			if enabled {
+				fmt.Println("approval token: ENABLED (approve, task done --force and memory approve require it)")
+			} else {
+				fmt.Println("approval token: not enabled — identity is self-declared via ACLINE_ACTOR_TYPE; run `acline auth init` in a terminal to enforce it")
+			}
+			return nil
+		},
+	}
+	return cmd
 }
 
-var authInitCmd = &cobra.Command{
-	Use:   "init",
-	Short: "Enable the approval token (interactive terminal required)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runAuthInit(st)
-	},
+func newAuthInitCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "init",
+		Short: "Enable the approval token (interactive terminal required)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return c.runAuthInit(c.st)
+		},
+	}
+	return cmd
 }
 
 // runAuthInit enables the approval token on s, after a human confirms on the
 // controlling terminal. It is shared by `acline auth init` and the offer
 // `acline init` makes; both need a real terminal, so an agent's shell cannot
 // enable a token it knows.
-func runAuthInit(s *store.Store) error {
-	tty, err := openTerminal()
+func (c *cli) runAuthInit(s *store.Store) error {
+	tty, err := c.openTerminal()
 	if err != nil {
 		return errNoTerminal
 	}
@@ -164,55 +175,56 @@ func runAuthInit(s *store.Store) error {
 	return nil
 }
 
-var authRotateCmd = &cobra.Command{
-	Use:   "rotate",
-	Short: "Replace the approval token (current token required)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		tty, err := openTerminal()
-		if err != nil {
-			return errNoTerminal
-		}
-		defer tty.Close()
-		current := os.Getenv(approvalTokenEnv)
-		if current == "" {
-			if current, err = promptLine(tty, "current approval token: ", true); err != nil {
+func newAuthRotateCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "rotate",
+		Short: "Replace the approval token (current token required)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tty, err := c.openTerminal()
+			if err != nil {
+				return errNoTerminal
+			}
+			defer tty.Close()
+			current := os.Getenv(approvalTokenEnv)
+			if current == "" {
+				if current, err = promptLine(tty, "current approval token: ", true); err != nil {
+					return err
+				}
+			}
+			token, err := c.st.RotateApprovalToken(current)
+			if err != nil {
 				return err
 			}
-		}
-		token, err := st.RotateApprovalToken(current)
-		if err != nil {
-			return err
-		}
-		fmt.Fprintf(tty, "\nNew approval token (the old one no longer works):\n\n  %s\n\n", token)
-		fmt.Println("approval token rotated")
-		return nil
-	},
+			fmt.Fprintf(tty, "\nNew approval token (the old one no longer works):\n\n  %s\n\n", token)
+			fmt.Println("approval token rotated")
+			return nil
+		},
+	}
+	return cmd
 }
 
-var authDisableCmd = &cobra.Command{
-	Use:   "disable",
-	Short: "Turn the approval token requirement off (current token required)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		tty, err := openTerminal()
-		if err != nil {
-			return errNoTerminal
-		}
-		defer tty.Close()
-		current := os.Getenv(approvalTokenEnv)
-		if current == "" {
-			if current, err = promptLine(tty, "current approval token: ", true); err != nil {
+func newAuthDisableCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "disable",
+		Short: "Turn the approval token requirement off (current token required)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			tty, err := c.openTerminal()
+			if err != nil {
+				return errNoTerminal
+			}
+			defer tty.Close()
+			current := os.Getenv(approvalTokenEnv)
+			if current == "" {
+				if current, err = promptLine(tty, "current approval token: ", true); err != nil {
+					return err
+				}
+			}
+			if err := c.st.DisableApprovalToken(current); err != nil {
 				return err
 			}
-		}
-		if err := st.DisableApprovalToken(current); err != nil {
-			return err
-		}
-		fmt.Println("approval token disabled")
-		return nil
-	},
-}
-
-func init() {
-	authCmd.AddCommand(authStatusCmd, authInitCmd, authRotateCmd, authDisableCmd)
-	rootCmd.AddCommand(authCmd)
+			fmt.Println("approval token disabled")
+			return nil
+		},
+	}
+	return cmd
 }

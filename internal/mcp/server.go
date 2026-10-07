@@ -104,14 +104,6 @@ func resolveProject(st *store.Store, name string) (*int64, error) {
 	return app.ResolveProject(st, name, false)
 }
 
-// resolveRole mirrors the CLI's resolveRoleFlag, using resolveProject's
-// same "no cwd to infer from" scoping: an explicit project name or nil,
-// never an ambient one. st.ResolveRole then applies its own flag > env >
-// active-session-role precedence.
-func resolveRole(st *store.Store, roleArg, projectName string) (*int64, error) {
-	return app.ResolveRole(st, roleArg, projectName, false)
-}
-
 func nullStrPtr(v sql.NullString) *string {
 	if !v.Valid {
 		return nil

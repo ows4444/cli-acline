@@ -150,7 +150,8 @@ func TestLogTaskEvent(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Message != "something happened" {
+	// events[0] is the newest; the task's task_created event comes before it.
+	if len(events) != 2 || events[0].Type != "note" || events[0].Message != "something happened" {
 		t.Fatalf("expected the logged event to be recorded, got %+v", events)
 	}
 }

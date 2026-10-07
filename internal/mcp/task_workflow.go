@@ -7,6 +7,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -86,12 +87,24 @@ type taskDeferOut struct {
 }
 
 func registerTaskWorkflowTools(s *sdkmcp.Server, st *store.Store) {
+	addTaskSetStatusTool(s, st)
+	addCriteriaListTool(s, st)
+	addCriteriaAddTool(s, st)
+	addCriteriaCheckTool(s, st)
+	addTaskLinkTool(s, st)
+	addTaskDeferTool(s, st)
+}
+
+func addTaskSetStatusTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_task_set_status",
 		Description: "Move a task to a status other than done, recording a status_change event atomically. " +
 			"Completing a task is acline_task_done, which evaluates the verification/approval gate; asking for 'done' here is refused.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args taskSetStatusArgs) (*sdkmcp.CallToolResult, taskSetStatusOut, error) {
-		err := st.SetTaskStatusWithReason(args.ID, args.Status, args.Reason)
+		if args.Status == "" {
+			return nil, taskSetStatusOut{}, fmt.Errorf("status is required")
+		}
+		_, err := app.UpdateTask(st, args.ID, store.TaskUpdate{Status: args.Status, Reason: args.Reason})
 		if errors.Is(err, store.ErrStatusDoneNeedsGate) {
 			return nil, taskSetStatusOut{}, fmt.Errorf("%w (acline_task_done)", err)
 		}
@@ -100,7 +113,9 @@ func registerTaskWorkflowTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("task #%d -> %s", args.ID, args.Status)), taskSetStatusOut{ID: args.ID, Status: args.Status}, nil
 	})
+}
 
+func addCriteriaListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_criteria_list",
 		Description: "List a task's acceptance criteria and whether each is done. Unchecked criteria are reported as warnings by the completion gate.",
@@ -118,21 +133,22 @@ func registerTaskWorkflowTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d criteri(a) on task #%d", len(list), args.TaskID)), out, nil
 	})
+}
 
+func addCriteriaAddTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_criteria_add",
 		Description: "Add an acceptance criterion to a task (EARS phrasing 'When X, the system shall Y' is recognized and recorded).",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args criterionAddArgs) (*sdkmcp.CallToolResult, criterionAddOut, error) {
-		if args.Text == "" {
-			return nil, criterionAddOut{}, fmt.Errorf("text is required")
-		}
-		id, pattern, err := st.AddCriterion(args.TaskID, args.Text)
+		id, pattern, err := app.AddCriterion(st, args.TaskID, args.Text)
 		if err != nil {
 			return nil, criterionAddOut{}, err
 		}
 		return textResult(fmt.Sprintf("criterion #%d added to task #%d", id, args.TaskID)), criterionAddOut{ID: id, Pattern: pattern}, nil
 	})
+}
 
+func addCriteriaCheckTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_criteria_check",
 		Description: "Mark an acceptance criterion done (or, with done=false, reopen it).",
@@ -143,40 +159,36 @@ func registerTaskWorkflowTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("criterion #%d done=%v", args.ID, done)), criterionCheckOut{ID: args.ID, Done: done}, nil
 	})
+}
 
+func addTaskLinkTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_task_link",
 		Description: "Link two tasks (depends_on|blocks|related). Same relation from `acline task link`.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args taskLinkArgs) (*sdkmcp.CallToolResult, taskLinkOut, error) {
-		if _, err := st.GetTask(args.TaskID); err != nil {
-			return nil, taskLinkOut{}, err
-		}
-		if _, err := st.GetTask(args.RelatedTaskID); err != nil {
-			return nil, taskLinkOut{}, err
-		}
-		id, err := st.AddLink(args.TaskID, args.RelatedTaskID, args.Relation)
+		id, err := app.LinkTasks(st, args.TaskID, args.Relation, args.RelatedTaskID)
 		if err != nil {
 			return nil, taskLinkOut{}, err
 		}
 		return textResult(fmt.Sprintf("link #%d created: task #%d %s task #%d", id, args.TaskID, args.Relation, args.RelatedTaskID)), taskLinkOut{ID: id}, nil
 	})
+}
 
+func addTaskDeferTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_task_defer",
 		Description: "Mark a task deferred (a disposition independent of status) with a reason and optional " +
 			"revisit trigger, or clear it with clear=true.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args taskDeferArgs) (*sdkmcp.CallToolResult, taskDeferOut, error) {
-		if args.Clear {
-			if err := st.DeferTask(args.ID, false, "", ""); err != nil {
-				return nil, taskDeferOut{}, err
-			}
-			return textResult(fmt.Sprintf("task #%d deferred flag cleared", args.ID)), taskDeferOut{ID: args.ID, Deferred: false}, nil
-		}
-		if args.Reason == "" {
+		err := app.DeferTask(st, args.ID, args.Clear, args.Reason, args.Trigger)
+		if errors.Is(err, app.ErrDeferReasonRequired) {
 			return nil, taskDeferOut{}, fmt.Errorf("reason is required unless clear=true")
 		}
-		if err := st.DeferTask(args.ID, true, args.Reason, args.Trigger); err != nil {
+		if err != nil {
 			return nil, taskDeferOut{}, err
+		}
+		if args.Clear {
+			return textResult(fmt.Sprintf("task #%d deferred flag cleared", args.ID)), taskDeferOut{ID: args.ID, Deferred: false}, nil
 		}
 		return textResult(fmt.Sprintf("task #%d deferred", args.ID)), taskDeferOut{ID: args.ID, Deferred: true}, nil
 	})

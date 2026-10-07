@@ -17,6 +17,7 @@ func count(t *testing.T, s *Store, q string, args ...any) int {
 func TestCompleteTaskBlockedWritesNothing(t *testing.T) {
 	s := humanStore(t)
 	id, _ := s.AddTask("t", "", "normal", TaskOpts{Risk: "high"})
+	events := count(t, s, `SELECT COUNT(*) FROM events`) // task_created
 
 	_, err := s.CompleteTask(id, false, "")
 	var blocked *GateBlockedError
@@ -26,8 +27,8 @@ func TestCompleteTaskBlockedWritesNothing(t *testing.T) {
 	if n := count(t, s, `SELECT COUNT(*) FROM approvals`); n != 0 {
 		t.Errorf("blocked completion wrote %d approval(s)", n)
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM events`); n != 0 {
-		t.Errorf("blocked completion wrote %d event(s)", n)
+	if n := count(t, s, `SELECT COUNT(*) FROM events`); n != events {
+		t.Errorf("blocked completion wrote %d event(s)", n-events)
 	}
 	if got, _ := s.GetTask(id); got.Status == "done" {
 		t.Error("task was completed despite a blocked gate")
@@ -68,6 +69,7 @@ func TestCompleteTaskRollsBackEverythingWhenALaterStepFails(t *testing.T) {
 	if _, err := s.DB.Exec(`CREATE TRIGGER fail_status BEFORE UPDATE OF status ON tasks BEGIN SELECT RAISE(ABORT, 'boom'); END`); err != nil {
 		t.Fatal(err)
 	}
+	events := count(t, s, `SELECT COUNT(*) FROM events`) // task_created
 
 	if _, err := s.CompleteTask(id, true, ""); err == nil {
 		t.Fatal("expected the injected status-update failure to surface")
@@ -75,8 +77,8 @@ func TestCompleteTaskRollsBackEverythingWhenALaterStepFails(t *testing.T) {
 	if n := count(t, s, `SELECT COUNT(*) FROM approvals`); n != 0 {
 		t.Errorf("override approval survived a failed completion (%d rows)", n)
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM events`); n != 0 {
-		t.Errorf("audit events survived a failed completion (%d rows)", n)
+	if n := count(t, s, `SELECT COUNT(*) FROM events`); n != events {
+		t.Errorf("audit events survived a failed completion (%d rows)", n-events)
 	}
 }
 

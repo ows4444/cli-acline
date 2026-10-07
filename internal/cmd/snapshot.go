@@ -15,58 +15,72 @@ import (
 // not a per-repo git-commit target the way it was before project scoping.
 const defaultSnapshotPath = "acline.json"
 
-var snapshotCmd = &cobra.Command{
-	Use:   "snapshot",
-	Short: "Export/import the full database (every tracked project) as one JSON backup file",
+func newSnapshotCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "snapshot",
+		Short: "Export/import the full database (every tracked project) as one JSON backup file",
+	}
+	cmd.AddCommand(newSnapshotExportCmd(c), newSnapshotImportCmd(c))
+	return cmd
 }
 
-var snapshotExportPath string
-
-var snapshotExportCmd = &cobra.Command{
-	Use:   "export",
-	Short: "Write the full database (every tracked project) to a JSON backup file",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		// The whole store (every project's specs, decisions, audit trail): as
-		// private as the store itself.
-		f, err := createPrivate(snapshotExportPath)
-		if err != nil {
-			return fmt.Errorf("creating %s: %w", snapshotExportPath, err)
-		}
-		if err := st.SnapshotJSON(f); err != nil {
-			f.Close()
-			return err
-		}
-		if err := f.Close(); err != nil {
-			return fmt.Errorf("writing %s: %w", snapshotExportPath, err)
-		}
-		fmt.Printf("wrote %s\n", snapshotExportPath)
-		return nil
-	},
+func newSnapshotExportCmd(c *cli) *cobra.Command {
+	var (
+		snapshotExportPath string
+	)
+	cmd := &cobra.Command{
+		Use:   "export",
+		Short: "Write the full database (every tracked project) to a JSON backup file",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			// The whole store (every project's specs, decisions, audit trail): as
+			// private as the store itself.
+			f, err := createPrivate(snapshotExportPath)
+			if err != nil {
+				return fmt.Errorf("creating %s: %w", snapshotExportPath, err)
+			}
+			if err := c.st.SnapshotJSON(f); err != nil {
+				f.Close()
+				return err
+			}
+			if err := f.Close(); err != nil {
+				return fmt.Errorf("writing %s: %w", snapshotExportPath, err)
+			}
+			fmt.Printf("wrote %s\n", snapshotExportPath)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&snapshotExportPath, "out", "o", defaultSnapshotPath, "output path")
+	return cmd
 }
 
-var snapshotImportPath string
-
-var snapshotImportCmd = &cobra.Command{
-	Use:   "import",
-	Short: "Load a JSON snapshot into the current database (idempotent: existing rows are left alone)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		f, err := os.Open(snapshotImportPath)
-		if err != nil {
-			return fmt.Errorf("opening %s: %w", snapshotImportPath, err)
-		}
-		defer f.Close()
-		var counts map[string]int
-		err = withApprovalToken("importing a snapshot into a store that already has data", func(token string) error {
-			var lerr error
-			counts, lerr = st.LoadSnapshotWithToken(f, token)
-			return lerr
-		})
-		if err != nil {
-			return err
-		}
-		printImportSummary(snapshotImportPath, counts)
-		return nil
-	},
+func newSnapshotImportCmd(c *cli) *cobra.Command {
+	var (
+		snapshotImportPath string
+	)
+	cmd := &cobra.Command{
+		Use:   "import",
+		Short: "Load a JSON snapshot into the current database (idempotent: existing rows are left alone)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			f, err := os.Open(snapshotImportPath)
+			if err != nil {
+				return fmt.Errorf("opening %s: %w", snapshotImportPath, err)
+			}
+			defer f.Close()
+			var counts map[string]int
+			err = c.withApprovalToken("importing a snapshot into a store that already has data", func(token string) error {
+				var lerr error
+				counts, lerr = c.st.LoadSnapshotWithToken(f, token)
+				return lerr
+			})
+			if err != nil {
+				return err
+			}
+			printImportSummary(snapshotImportPath, counts)
+			return nil
+		},
+	}
+	cmd.Flags().StringVarP(&snapshotImportPath, "in", "i", defaultSnapshotPath, "input path")
+	return cmd
 }
 
 func printImportSummary(path string, counts map[string]int) {
@@ -85,14 +99,6 @@ func printImportSummary(path string, counts map[string]int) {
 	for _, t := range tables {
 		fmt.Printf("  %-14s %d\n", t, counts[t])
 	}
-}
-
-func init() {
-	snapshotExportCmd.Flags().StringVarP(&snapshotExportPath, "out", "o", defaultSnapshotPath, "output path")
-	snapshotImportCmd.Flags().StringVarP(&snapshotImportPath, "in", "i", defaultSnapshotPath, "input path")
-
-	snapshotCmd.AddCommand(snapshotExportCmd, snapshotImportCmd)
-	rootCmd.AddCommand(snapshotCmd)
 }
 
 // createPrivate creates (or truncates) path readable only by the user, also

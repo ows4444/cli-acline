@@ -6,7 +6,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"acline/internal/redact"
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -76,11 +76,28 @@ type memoryIDArgs struct {
 	ID int64 `json:"id" jsonschema:"the memory entry id"`
 }
 
+// memoryRetireArgs is memoryIDArgs plus the approval token: forgetting and
+// reconfirming memory are a person's decisions (store.ErrAgentCannotRetireMemory).
+type memoryRetireArgs struct {
+	ID    int64  `json:"id" jsonschema:"the memory entry id"`
+	Token string `json:"token,omitempty" jsonschema:"human approval token; needed when the store has one enabled or the server's actor is an agent. Never read from the server's environment."`
+}
+
 type memoryIDOut struct {
 	ID int64 `json:"id"`
 }
 
 func registerMemoryTools(s *sdkmcp.Server, st *store.Store) {
+	addMemoryListTool(s, st)
+	addMemoryAddTool(s, st)
+	addMemoryDecayTool(s, st)
+	addMemoryTouchTool(s, st)
+	addMemoryForgetTool(s, st)
+	addMemoryReviewTool(s, st, "acline_memory_approve", "approved", true)
+	addMemoryReviewTool(s, st, "acline_memory_reject", "rejected", false)
+}
+
+func addMemoryListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_memory_list",
 		Description: "List durable memory entries (constraints/lessons/pitfalls/operational notes/failure patterns), optionally filtered by status or project. Pass status=\"pending\" to see the review queue.",
@@ -100,47 +117,28 @@ func registerMemoryTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d memory entr(ies)", len(page))), out, nil
 	})
+}
 
+func addMemoryAddTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_memory_add",
 		Description: "Record a durable memory entry -- a non-obvious lesson/constraint/pitfall not derivable " +
 			"from code. Agent-written entries land pending review. Any live secret value pasted in body is " +
 			"redacted before storage.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args memoryAddArgs) (*sdkmcp.CallToolResult, memoryAddOut, error) {
-		if args.Body == "" {
-			return nil, memoryAddOut{}, fmt.Errorf("body is required")
-		}
-		body := args.Body
-		redacted := false
-		if r, found := redact.Secrets(body); found {
-			body = r
-			redacted = true
-		}
-		projectID, err := resolveProject(st, args.Project)
+		res, err := app.AddMemory(st, app.AddMemoryRequest{Area: args.Area, Kind: args.Kind, Body: args.Body, ProjectArg: args.Project})
 		if err != nil {
 			return nil, memoryAddOut{}, err
 		}
-		kind := args.Kind
-		if kind == "" {
-			kind = "lesson"
+		out := memoryAddOut{ID: res.ID, PendingReview: res.Pending, SecretsRedacted: res.Redacted}
+		if res.Similar != nil {
+			out.SimilarTo = &res.Similar.ID
 		}
-		similar, _ := st.SimilarMemory(body, projectID)
-		id, err := st.AddMemory(args.Area, kind, body, store.MemoryOpts{ProjectID: projectID})
-		if err != nil {
-			return nil, memoryAddOut{}, err
-		}
-		var similarTo *int64
-		if similar != nil {
-			similarTo = &similar.ID
-		}
-		st.LogEventGlobal("memory_recorded", fmt.Sprintf("memory #%d recorded (%s)", id, kind))
-		if redacted {
-			st.LogEventGlobal("secret_redacted", fmt.Sprintf("memory #%d: a pasted secret value was redacted before recording", id))
-		}
-		pending := st.Actor.Type == "agent"
-		return textResult(fmt.Sprintf("memory #%d recorded", id)), memoryAddOut{ID: id, PendingReview: pending, SecretsRedacted: redacted, SimilarTo: similarTo}, nil
+		return textResult(recordedSummary("memory", res.RecordResult)), out, nil
 	})
+}
 
+func addMemoryDecayTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_memory_decay",
 		Description: "List approved memory entries not reconfirmed (via touch) in --days days (default 90) -- candidates for a human to reconfirm or retire. Nothing is auto-deleted or auto-marked stale.",
@@ -163,41 +161,42 @@ func registerMemoryTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d entr(ies) not reconfirmed in %d+ days", len(entries), days)), out, nil
 	})
+}
 
+func addMemoryTouchTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_memory_touch",
-		Description: "Reconfirm a memory entry is still true, resetting its decay clock (see acline_memory_decay).",
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args memoryIDArgs) (*sdkmcp.CallToolResult, memoryIDOut, error) {
-		if err := st.TouchMemory(args.ID); err != nil {
+		Description: "Reconfirm a memory entry is still true, resetting its decay clock (see acline_memory_decay). A person's decision: refused for an agent unless it presents the approval token; recorded as a memory_reconfirmed event.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args memoryRetireArgs) (*sdkmcp.CallToolResult, memoryIDOut, error) {
+		if err := st.TouchMemoryWithToken(args.ID, args.Token); err != nil {
 			return nil, memoryIDOut{}, err
 		}
-		return textResult(fmt.Sprintf("memory #%d reconfirmed", args.ID)), memoryIDOut(args), nil
+		return textResult(fmt.Sprintf("memory #%d reconfirmed", args.ID)), memoryIDOut{ID: args.ID}, nil
 	})
+}
 
+func addMemoryForgetTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_memory_forget",
-		Description: "Mark a memory entry stale (excluded from default list/search results). Never deletes it -- the row stays in the audit trail.",
-	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args memoryIDArgs) (*sdkmcp.CallToolResult, memoryIDOut, error) {
-		if err := st.SetMemoryStale(args.ID, true); err != nil {
+		Description: "Mark a memory entry stale, dropping it from context and the default list. Never deletes the row; the change is recorded as a memory_forgotten event. A person's decision: refused for an agent unless it presents the approval token.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args memoryRetireArgs) (*sdkmcp.CallToolResult, memoryIDOut, error) {
+		if err := st.SetMemoryStaleWithToken(args.ID, true, args.Token); err != nil {
 			return nil, memoryIDOut{}, err
 		}
-		return textResult(fmt.Sprintf("memory #%d marked stale", args.ID)), memoryIDOut(args), nil
+		return textResult(fmt.Sprintf("memory #%d marked stale", args.ID)), memoryIDOut{ID: args.ID}, nil
 	})
+}
 
-	for _, decision := range []struct {
-		name, verb string
-		approve    bool
-	}{{"acline_memory_approve", "approved", true}, {"acline_memory_reject", "rejected", false}} {
-		decision := decision
-		addTool(s, &sdkmcp.Tool{
-			Name: decision.name,
-			Description: "Review a pending memory entry: " + decision.verb + ". Entries written by an agent are held for review; " +
-				"if this server's actor is an agent the call is refused -- an agent cannot review memory (a human must).",
-		}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args memoryReviewArgs) (*sdkmcp.CallToolResult, memoryIDOut, error) {
-			if err := st.ReviewMemory(args.ID, decision.approve, args.Token); err != nil {
-				return nil, memoryIDOut{}, err
-			}
-			return textResult(fmt.Sprintf("memory #%d %s", args.ID, decision.verb)), memoryIDOut{ID: args.ID}, nil
-		})
-	}
+// addMemoryReviewTool registers acline_memory_approve or acline_memory_reject.
+func addMemoryReviewTool(s *sdkmcp.Server, st *store.Store, name, verb string, approve bool) {
+	addTool(s, &sdkmcp.Tool{
+		Name: name,
+		Description: "Review a pending memory entry: " + verb + ". Entries written by an agent are held for review; " +
+			"if this server's actor is an agent the call is refused -- an agent cannot review memory (a human must).",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args memoryReviewArgs) (*sdkmcp.CallToolResult, memoryIDOut, error) {
+		if err := st.ReviewMemory(args.ID, approve, args.Token); err != nil {
+			return nil, memoryIDOut{}, err
+		}
+		return textResult(fmt.Sprintf("memory #%d %s", args.ID, verb)), memoryIDOut{ID: args.ID}, nil
+	})
 }

@@ -11,6 +11,5 @@ read it, and do not exceed it. Start with `acline brief <id>`.
   EARS form: "When X, the system shall Y". A new spec is a draft; a person approves it.
 - Flag ambiguity early. Hand off with `acline task assign <id> developer`.
 
-You have no Edit or Write tool. Shell access is held to read-only by the guard only
-when the session runs as this role (`ACLINE_ROLE=designer` or
-`acline session start --role designer`), so do not use Bash to change files.
+You have no Edit or Write tool, and the guard holds your shell to read-only too: it
+knows this agent is `designer` and denies file writes, so do not use Bash to change files.

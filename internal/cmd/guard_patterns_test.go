@@ -15,7 +15,7 @@ func TestGuardBlocksMoreCredentialFiles(t *testing.T) {
 		if blocked, _ := checkFilePathForSecrets(path); !blocked {
 			t.Errorf("Read of %q was allowed", path)
 		}
-		if blocked, _ := checkBashCommand("cat " + path); !blocked {
+		if blocked, _ := checkBashCommand("", "cat "+path); !blocked {
 			t.Errorf("`cat %s` was allowed", path)
 		}
 	}
@@ -34,7 +34,7 @@ func TestGuardBlocksIrreversibleGitAndFindCommands(t *testing.T) {
 		"find . -delete", "find /repo -name '*.go' -delete", "find . -type f -exec rm {} +",
 	}
 	for _, c := range blocked {
-		if b, _ := checkBashCommand(c); !b {
+		if b, _ := checkBashCommand("", c); !b {
 			t.Errorf("expected BLOCK for %q", c)
 		}
 	}
@@ -45,14 +45,14 @@ func TestGuardBlocksIrreversibleGitAndFindCommands(t *testing.T) {
 		`echo "find . -delete is dangerous"`, "git status", "git diff",
 	}
 	for _, c := range allowed {
-		if b, why := checkBashCommand(c); b {
+		if b, why := checkBashCommand("", c); b {
 			t.Errorf("expected ALLOW for %q, got %q", c, why)
 		}
 	}
 }
 
 func TestChmodRecursiveIsLoggedNotBlocked(t *testing.T) {
-	if b, _ := checkBashCommand("chmod -R 755 build/"); b {
+	if b, _ := checkBashCommand("", "chmod -R 755 build/"); b {
 		t.Error("chmod -R is routine; it should be logged, not blocked")
 	}
 	if checkBashCommandWarnings("chmod -R 755 build/") == "" {

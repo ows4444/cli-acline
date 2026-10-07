@@ -43,7 +43,7 @@ func FuzzBashScanTargets(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, which, shape uint8, filler string) {
 		danger := fuzzDangerous[int(which)%len(fuzzDangerous)]
-		if denied, _ := checkBashCommand(danger); !denied {
+		if denied, _ := checkBashCommand("", danger); !denied {
 			t.Fatalf("premise: %q must be denied on its own", danger)
 		}
 		b := fuzzFiller(filler)
@@ -64,7 +64,7 @@ func FuzzBashScanTargets(f *testing.F) {
 			b + " & " + danger,
 		}
 		cmd := shapes[int(shape)%len(shapes)]
-		if denied, _ := checkBashCommand(cmd); !denied {
+		if denied, _ := checkBashCommand("", cmd); !denied {
 			t.Errorf("guard cleared a command bash would run: %q", cmd)
 		}
 	})
@@ -81,6 +81,6 @@ func FuzzBashScanTargetsNeverPanics(f *testing.F) {
 	}
 	f.Fuzz(func(t *testing.T, cmd string) {
 		_ = bashScanTargets(cmd, 0)
-		_, _ = checkBashCommand(cmd)
+		_, _ = checkBashCommand("", cmd)
 	})
 }

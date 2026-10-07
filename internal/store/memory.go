@@ -2,6 +2,7 @@ package store
 
 import (
 	"acline/internal/clip"
+	"acline/internal/redact"
 	"database/sql"
 	"errors"
 	"fmt"
@@ -50,7 +51,7 @@ var ValidMemoryStatuses = map[string]bool{
 // AddMemory records a durable lesson. Agent-written entries land in 'pending'
 // and must be reviewed; human-written entries are approved on arrival.
 func (s *Store) AddMemory(area, kind, body string, opts ...MemoryOpts) (int64, error) {
-	body = scrubText(body)
+	redacted := redact.Fields(&body)
 	if kind == "" {
 		kind = "lesson"
 	}
@@ -68,16 +69,23 @@ func (s *Store) AddMemory(area, kind, body string, opts ...MemoryOpts) (int64, e
 		status = "approved"
 		reviewedAt = now
 	}
-	res, err := s.DB.Exec(
-		`INSERT INTO memory (area, kind, body, status, project_id, actor_type, actor_id, model, reviewed_at, source_kind, source_id, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-		nullStr(area), kind, body, status, nullInt(opt.ProjectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), reviewedAt,
-		nullStr(opt.SourceKind), sourceIDArg(opt), now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
+	id, err := s.writeRecordWithEvent("memory", "memory_recorded", redacted, func(tx *sql.Tx) (int64, string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO memory (area, kind, body, status, project_id, actor_type, actor_id, model, reviewed_at, source_kind, source_id, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+			nullStr(area), kind, body, status, nullInt(opt.ProjectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), reviewedAt,
+			nullStr(opt.SourceKind), sourceIDArg(opt), now,
+		)
+		if err != nil {
+			return 0, "", err
+		}
+		id, err := res.LastInsertId()
+		msg := fmt.Sprintf("memory #%d recorded (%s, %s)", id, kind, status)
+		if opt.SourceKind != "" {
+			msg += fmt.Sprintf(", drafted from %s #%d", opt.SourceKind, opt.SourceID)
+		}
+		return id, msg, err
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -115,14 +123,11 @@ func (s *Store) ReviewMemory(id int64, approve bool, token string) error {
 	// presented (and then also lets a server whose actor is an agent -- e.g. one
 	// spawned by an editor -- act on a human's behalf). Rejecting is the safe
 	// direction and needs no token, only a non-agent actor.
-	viaToken := false
 	if approve {
-		var err error
-		if viaToken, err = s.authorize(token); err != nil {
+		if err := s.requirePerson(token, ErrAgentCannotReview); err != nil {
 			return err
 		}
-	}
-	if s.Actor.Type == "agent" && !viaToken {
+	} else if s.Actor.Type == "agent" {
 		return ErrAgentCannotReview
 	}
 	status := "rejected"
@@ -132,25 +137,51 @@ func (s *Store) ReviewMemory(id int64, approve bool, token string) error {
 	return s.setMemoryStatus(id, status)
 }
 
+// ErrAgentCannotRetireMemory is returned when an agent marks a memory entry
+// stale, restores one, or reconfirms one. Approved memory is trusted context
+// (constraints reach every session), so retiring it is the same kind of call as
+// retiring an accepted decision, and keeping an old entry alive by reconfirming
+// it is a person's judgement that it still holds.
+var ErrAgentCannotRetireMemory = errors.New("an agent cannot forget, restore or reconfirm a memory entry: a person must (propose the change with `acline note add`)")
+
+// SetMemoryStale marks an entry stale (forget) or live again (restore). See
+// SetMemoryStaleWithToken.
 func (s *Store) SetMemoryStale(id int64, stale bool) error {
-	res, err := s.DB.Exec(`UPDATE memory SET stale = ? WHERE id = ?`, stale, id)
-	if err != nil {
+	return s.SetMemoryStaleWithToken(id, stale, "")
+}
+
+// SetMemoryStaleWithToken is SetMemoryStale with the approval token. It needs a
+// person (or the token), and records memory_forgotten / memory_restored in the
+// same transaction as the change.
+func (s *Store) SetMemoryStaleWithToken(id int64, stale bool, token string) error {
+	if err := s.requirePerson(token, ErrAgentCannotRetireMemory); err != nil {
 		return err
 	}
-	return mustExist(res, "memory entry", id)
+	eventType, verb := "memory_restored", "restored"
+	if stale {
+		eventType, verb = "memory_forgotten", "marked stale"
+	}
+	return s.changeWithEvent("memory entry", id, eventType, fmt.Sprintf("memory #%d %s", id, verb),
+		`UPDATE memory SET stale = ? WHERE id = ?`, stale, id)
 }
 
 // TouchMemory resets an entry's decay clock (see DecayCandidates) by
 // bumping reviewed_at to now, without otherwise changing it — the way a
 // human reconfirms "still true" for an old lesson/constraint they just
-// re-read, short of re-running the full approve flow.
+// re-read, short of re-running the full approve flow. See TouchMemoryWithToken.
 func (s *Store) TouchMemory(id int64) error {
-	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(`UPDATE memory SET reviewed_at = ? WHERE id = ?`, now, id)
-	if err != nil {
+	return s.TouchMemoryWithToken(id, "")
+}
+
+// TouchMemoryWithToken is TouchMemory with the approval token. It needs a person
+// (or the token) and records memory_reconfirmed in the same transaction.
+func (s *Store) TouchMemoryWithToken(id int64, token string) error {
+	if err := s.requirePerson(token, ErrAgentCannotRetireMemory); err != nil {
 		return err
 	}
-	return mustExist(res, "memory entry", id)
+	now := time.Now().UTC().Format(time.RFC3339)
+	return s.changeWithEvent("memory entry", id, "memory_reconfirmed", fmt.Sprintf("memory #%d reconfirmed", id),
+		`UPDATE memory SET reviewed_at = ? WHERE id = ?`, now, id)
 }
 
 // decayWhereClause is shared by DecayCandidates and CountDecayCandidates:
@@ -330,13 +361,10 @@ func (s *Store) draftFailurePattern(taskID int64, sourceKind, detail string) {
 	if task.Area.Valid {
 		area = task.Area.String
 	}
-	id, err := s.AddMemory(area, "failure_pattern", body, MemoryOpts{
+	// AddMemory records memory_recorded, naming the source it was drafted from.
+	_, _ = s.AddMemory(area, "failure_pattern", body, MemoryOpts{
 		ProjectID: projectID, SourceKind: sourceKind, SourceID: taskID, ForcePending: true,
 	})
-	if err != nil {
-		return
-	}
-	s.LogEventGlobal("memory_drafted", fmt.Sprintf("memory #%d drafted from %s on task #%d (pending review)", id, sourceKind, taskID))
 }
 
 // RecallForTask returns the approved pitfall and failure_pattern memory

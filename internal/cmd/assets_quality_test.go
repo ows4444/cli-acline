@@ -124,6 +124,7 @@ func TestAssetsOnlyMentionRealCommandsAndFlags(t *testing.T) {
 // names, using only its leading command words (a word that starts a placeholder,
 // a quote or a flag ends them).
 func resolveInvocation(span string) (*cobra.Command, error) {
+	root := newRootCmd(newCLI())
 	var words []string
 	for _, tok := range strings.Fields(span)[1:] {
 		if !regexp.MustCompile(`^[a-z][a-z-]*$`).MatchString(tok) {
@@ -132,10 +133,10 @@ func resolveInvocation(span string) (*cobra.Command, error) {
 		words = append(words, tok)
 	}
 	if len(words) == 0 {
-		return rootCmd, nil // `acline <something>` or a bare mention
+		return root, nil // `acline <something>` or a bare mention
 	}
-	cmd, rest, err := rootCmd.Find(words)
-	if err != nil || cmd == rootCmd {
+	cmd, rest, err := root.Find(words)
+	if err != nil || cmd == root {
 		return nil, errNoCommand(words)
 	}
 	// a leftover word must be a positional argument of a leaf command, not a
@@ -276,8 +277,14 @@ func TestReadOnlyAgentsDescribeTheirLimitHonestly(t *testing.T) {
 		if f.kind != "agent" || strings.Contains(f.front["tools"], "Edit") {
 			continue
 		}
-		if !strings.Contains(f.text, "ACLINE_ROLE") || !strings.Contains(f.text, "guard") {
-			t.Errorf("%s: a read-only agent must say the guard holds Bash to read-only only when the session runs as this role (ACLINE_ROLE)", f.rel)
+		// The guard applies the role from the subagent's name (agent_type), so the
+		// agent must say its shell is held to read-only, and must not claim the
+		// old, weaker limit (only when the session runs as the role).
+		if !strings.Contains(f.text, "guard holds your shell to read-only") {
+			t.Errorf("%s: a read-only agent must say the guard holds its shell to read-only", f.rel)
+		}
+		if strings.Contains(f.text, "only\nwhen the session runs as this role") || strings.Contains(f.text, "only when the session runs as this role") {
+			t.Errorf("%s: still describes the old limit (read-only only as a role session)", f.rel)
 		}
 	}
 }

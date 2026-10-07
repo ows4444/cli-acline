@@ -6,26 +6,34 @@ import (
 	"fmt"
 	"strings"
 	"time"
+
+	"acline/internal/redact"
 )
 
 // Spec is the versioned statement of intent a task is derived from.
 // Spec-driven development treats this, not the code, as the anchor.
 type Spec struct {
-	ID        int64
-	Title     string
-	Body      sql.NullString
-	Status    string
-	Version   int
-	ProjectID sql.NullInt64
-	ActorType sql.NullString
-	ActorID   sql.NullString
-	Model     sql.NullString
-	CreatedAt string
-	UpdatedAt string
+	ID      int64
+	Title   string
+	Body    sql.NullString
+	Status  string
+	Version int
+	// SupersededBy is the spec that replaced this one (status superseded).
+	SupersededBy sql.NullInt64
+	ProjectID    sql.NullInt64
+	ActorType    sql.NullString
+	ActorID      sql.NullString
+	Model        sql.NullString
+	CreatedAt    string
+	UpdatedAt    string
 }
 
+// ValidSpecStatuses are the statuses a spec is stored with. Whether an
+// approved spec is implemented is not stored: it is whether every task derived
+// from it is done (SpecImplemented), which a stored status would only repeat
+// and could disagree with.
 var ValidSpecStatuses = map[string]bool{
-	"draft": true, "approved": true, "implemented": true, "superseded": true,
+	"draft": true, "approved": true, "superseded": true,
 }
 
 // SpecOpts is variadic on AddSpec so existing 2-arg call sites keep
@@ -35,21 +43,24 @@ type SpecOpts struct {
 }
 
 func (s *Store) AddSpec(title, body string, opts ...SpecOpts) (int64, error) {
-	title, body = scrubText(title), scrubText(body)
+	redacted := redact.Fields(&title, &body)
 	var opt SpecOpts
 	if len(opts) > 0 {
 		opt = opts[0]
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
-		`INSERT INTO specs (title, body, status, version, project_id, actor_type, actor_id, model, created_at, updated_at)
-		 VALUES (?, ?, 'draft', 1, ?, ?, ?, ?, ?, ?)`,
-		title, nullStr(body), nullInt(opt.ProjectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	id, err := res.LastInsertId()
+	id, err := s.writeRecordWithEvent("spec", "spec_recorded", redacted, func(tx *sql.Tx) (int64, string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO specs (title, body, status, version, project_id, actor_type, actor_id, model, created_at, updated_at)
+			 VALUES (?, ?, 'draft', 1, ?, ?, ?, ?, ?, ?)`,
+			title, nullStr(body), nullInt(opt.ProjectID), s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now,
+		)
+		if err != nil {
+			return 0, "", err
+		}
+		id, err := res.LastInsertId()
+		return id, fmt.Sprintf("spec #%d drafted: %s", id, title), err
+	})
 	if err != nil {
 		return 0, err
 	}
@@ -76,31 +87,78 @@ func (s *Store) ApproveSpec(id int64, token string) error {
 	return s.setSpecStatus(id, "approved")
 }
 
+// ErrAgentCannotRetireSpec is returned when an agent actor tries to supersede an
+// approved spec without an approval token: approved text is what plans, briefs
+// and context export treat as authoritative, so retiring it is a person's call,
+// like approving it. A draft can be superseded by anyone.
+var ErrAgentCannotRetireSpec = errors.New("an agent cannot supersede an approved spec: a person must decide (draft the replacement with `acline spec add`)")
+
+// SupersedeSpec marks spec id superseded by newID. Superseded is final: the
+// spec can no longer be approved or revised, and keeps pointing at its
+// replacement.
+func (s *Store) SupersedeSpec(id, newID int64, token string) error {
+	if id == newID {
+		return fmt.Errorf("spec #%d cannot supersede itself", id)
+	}
+	if _, err := s.GetSpec(newID); err != nil {
+		return fmt.Errorf("superseding spec: %w", err)
+	}
+	cur, err := s.GetSpec(id)
+	if err != nil {
+		return err
+	}
+	if cur.Status == "approved" {
+		if err := s.requirePerson(token, ErrAgentCannotRetireSpec); err != nil {
+			return err
+		}
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	return s.transitionWithEvent("spec", id, "superseded", "spec_recorded", fmt.Sprintf("spec #%d superseded by #%d", id, newID),
+		`UPDATE specs SET status = 'superseded', superseded_by = ?, updated_at = ? WHERE id = ?`, newID, now, id)
+}
+
+// SpecImplemented reports whether spec id is approved, has derived tasks, and
+// every one of them is done.
+func (s *Store) SpecImplemented(id int64) (bool, error) {
+	var implemented bool
+	err := s.DB.QueryRow(`SELECT sp.status = 'approved'
+			AND EXISTS (SELECT 1 FROM tasks t WHERE t.spec_id = sp.id)
+			AND NOT EXISTS (SELECT 1 FROM tasks t WHERE t.spec_id = sp.id AND t.status != 'done')
+		FROM specs sp WHERE sp.id = ?`, id).Scan(&implemented)
+	if errors.Is(err, sql.ErrNoRows) {
+		return false, fmt.Errorf("spec #%d: %w", id, ErrNotFound)
+	}
+	return implemented, err
+}
+
 func (s *Store) setSpecStatus(id int64, status string) error {
 	if !ValidSpecStatuses[status] {
 		return fmt.Errorf("invalid spec status %q", status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	return s.changeWithEvent("spec", id, "spec_recorded", fmt.Sprintf("spec #%d %s", id, status),
+	return s.transitionWithEvent("spec", id, status, "spec_recorded", fmt.Sprintf("spec #%d %s", id, status),
 		`UPDATE specs SET status = ?, updated_at = ? WHERE id = ?`, status, now, id)
 }
 
 // ReviseSpec replaces the body and bumps the version, returning the new version.
 //
-// A spec that was approved (or implemented) stops being approved when its text
+// A spec that was approved stops being approved when its text
 // changes: the approval was of the old text, and approved-spec text feeds
 // context export, briefs and orchestrator prompts as authoritative. It goes
 // back to draft and needs approving again. What the spec said before is kept in
 // spec_versions, and the change is recorded as a spec_revised event, in the same
 // transaction as the revision.
 func (s *Store) ReviseSpec(id int64, body string) (int, error) {
-	body = scrubText(body)
+	redacted := redact.Fields(&body)
 	cur, err := s.GetSpec(id)
 	if err != nil {
 		return 0, err
 	}
+	if cur.Status == "superseded" {
+		return 0, fmt.Errorf("spec #%d is superseded by #%d: revise that one instead: %w", id, cur.SupersededBy.Int64, ErrInvalidTransition)
+	}
 	newStatus := cur.Status
-	if cur.Status == "approved" || cur.Status == "implemented" {
+	if cur.Status == "approved" {
 		newStatus = "draft"
 	}
 	sessionID := s.currentSessionID()
@@ -131,6 +189,12 @@ func (s *Store) ReviseSpec(id int64, body string) (int, error) {
 	msg := fmt.Sprintf("spec #%d v%d -> v%d (status %s -> %s)", id, cur.Version, cur.Version+1, cur.Status, newStatus)
 	if _, err := s.logEventTx(tx, nil, sessionID, nil, "spec_revised", msg); err != nil {
 		return 0, err
+	}
+	if redacted {
+		if _, err := s.logEventTx(tx, nil, sessionID, nil, "secret_redacted",
+			fmt.Sprintf("spec #%d: a pasted secret value was redacted before recording", id)); err != nil {
+			return 0, err
+		}
 	}
 	if err := tx.Commit(); err != nil {
 		return 0, err
@@ -178,11 +242,11 @@ func (s *Store) ListSpecVersions(specID int64) ([]SpecVersion, error) {
 	return out, rows.Err()
 }
 
-const specColumns = `id, title, body, status, version, project_id, actor_type, actor_id, model, created_at, updated_at`
+const specColumns = `id, title, body, status, version, superseded_by, project_id, actor_type, actor_id, model, created_at, updated_at`
 
 func scanSpec(row interface{ Scan(...any) error }) (*Spec, error) {
 	sp := &Spec{}
-	if err := row.Scan(&sp.ID, &sp.Title, &sp.Body, &sp.Status, &sp.Version, &sp.ProjectID,
+	if err := row.Scan(&sp.ID, &sp.Title, &sp.Body, &sp.Status, &sp.Version, &sp.SupersededBy, &sp.ProjectID,
 		&sp.ActorType, &sp.ActorID, &sp.Model, &sp.CreatedAt, &sp.UpdatedAt); err != nil {
 		return nil, err
 	}

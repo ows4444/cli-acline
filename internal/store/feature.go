@@ -38,15 +38,20 @@ func (s *Store) AddFeature(name, status string, opts FeatureOpts) (int64, error)
 		return 0, fmt.Errorf("invalid feature status %q", status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
-		`INSERT INTO features (name, status, owner_area, source_pointer, description, project_id, created_at, updated_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
-		name, status, nullStr(opts.OwnerArea), nullStr(opts.SourcePointer), nullStr(opts.Description), nullInt(opts.ProjectID), now, now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	var id int64
+	err := s.writeWithEvent(nil, "feature_recorded", func(tx *sql.Tx) (string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO features (name, status, owner_area, source_pointer, description, project_id, created_at, updated_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+			name, status, nullStr(opts.OwnerArea), nullStr(opts.SourcePointer), nullStr(opts.Description), nullInt(opts.ProjectID), now, now,
+		)
+		if err != nil {
+			return "", err
+		}
+		id, err = res.LastInsertId()
+		return fmt.Sprintf("feature #%d %s (%s)", id, name, status), err
+	})
+	return id, err
 }
 
 func (s *Store) SetFeatureStatus(id int64, status string) error {
@@ -54,12 +59,8 @@ func (s *Store) SetFeatureStatus(id int64, status string) error {
 		return fmt.Errorf("invalid feature status %q", status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(`UPDATE features SET status = ?, updated_at = ? WHERE id = ?`, status, now, id)
-	if err != nil {
-		return err
-	}
-	// Previously a missing id "succeeded" silently.
-	return mustExist(res, "feature", id)
+	return s.changeWithEvent("feature", id, "feature_status_change", fmt.Sprintf("feature #%d -> %s", id, status),
+		`UPDATE features SET status = ?, updated_at = ? WHERE id = ?`, status, now, id)
 }
 
 func (s *Store) ListFeatures(status string, projectID *int64) ([]Feature, error) {

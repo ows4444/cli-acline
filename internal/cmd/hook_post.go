@@ -23,15 +23,17 @@ import (
 // nothing and would drown the trail. It never blocks and never fails the turn:
 // by the time it runs the tool already has.
 
-var hookPostToolUseCmd = &cobra.Command{
-	Use:   "post-tool-use",
-	Short: "PostToolUse: record which file an agent wrote or which command it ran on the active session (never blocks)",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		enterProjectDir()
-		recordToolUse(st, os.Stdin)
-		return nil
-	},
+func newHookPostToolUseCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:   "post-tool-use",
+		Short: "PostToolUse: record which file an agent wrote or which command it ran on the active session (never blocks)",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			enterProjectDir()
+			recordToolUse(c.st, os.Stdin)
+			return nil
+		},
+	}
 }
 
 // maxCommandInEvent bounds how much of a shell command the event keeps; the
@@ -85,8 +87,4 @@ func toolUseMessage(p hookPayload) string {
 		return fmt.Sprintf("Bash sha256:%s %s", hex.EncodeToString(sum[:8]), oneLine)
 	}
 	return ""
-}
-
-func init() {
-	hookCmd.AddCommand(hookPostToolUseCmd)
 }

@@ -8,11 +8,6 @@ import (
 	"acline/internal/store"
 )
 
-var (
-	routeProject string
-	routeJSON    bool
-)
-
 // routeView is the --json shape of a store.Route: plain types only.
 type routeView struct {
 	TaskID        int64            `json:"task_id"`
@@ -83,50 +78,55 @@ func printRoute(r *store.Route) {
 	}
 }
 
-var nextCmd = &cobra.Command{
-	Use:     "next [task-id]",
-	Aliases: []string{"route"},
-	Short:   "Say what should happen next (and by which role) for a task, or pick the next task",
-	Long: "With a task id, derive that task's next step from its recorded state: spec, criteria, checks and gate.\n" +
-		"Without one, pick the highest-priority open task an agent can act on (falling back to one waiting on a person).\n" +
-		"Advisory only: nothing enforces that the suggested role acts.",
-	Args: cobra.MaximumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		var r *store.Route
-		if len(args) == 1 {
-			id, err := parseID(args[0], "task")
-			if err != nil {
-				return err
-			}
-			if r, err = st.RouteTask(id); err != nil {
-				return err
-			}
-		} else {
-			projectID, err := resolveProjectFlagOptional(routeProject)
-			if err != nil {
-				return err
-			}
-			if r, err = st.NextTask(projectID); err != nil {
-				return err
-			}
-			if r == nil {
-				if routeJSON {
-					return printJSON(nil)
+func newNextCmd(c *cli) *cobra.Command {
+	var (
+		routeProject string
+		routeJSON    bool
+	)
+	var allProjects bool
+	cmd := &cobra.Command{
+		Use:     "next [task-id]",
+		Aliases: []string{"route"},
+		Short:   "Say what should happen next (and by which role) for a task, or pick the next task",
+		Long: "With a task id, derive that task's next step from its recorded state: spec, criteria, checks and gate.\n" +
+			"Without one, pick the highest-priority open task an agent can act on (falling back to one waiting on a person).\n" +
+			"Advisory only: nothing enforces that the suggested role acts.",
+		Args: cobra.MaximumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			var r *store.Route
+			if len(args) == 1 {
+				id, err := parseID(args[0], "task")
+				if err != nil {
+					return err
 				}
-				fmt.Println("no open tasks")
-				return nil
+				if r, err = c.st.RouteTask(id); err != nil {
+					return err
+				}
+			} else {
+				projectID, err := c.resolveListScope(routeProject, allProjects)
+				if err != nil {
+					return err
+				}
+				if r, err = c.st.NextTask(projectID); err != nil {
+					return err
+				}
+				if r == nil {
+					if routeJSON {
+						return printJSON(nil)
+					}
+					fmt.Println("no open tasks")
+					return nil
+				}
 			}
-		}
-		if routeJSON {
-			return printJSON(newRouteView(r))
-		}
-		printRoute(r)
-		return nil
-	},
-}
-
-func init() {
-	nextCmd.Flags().StringVar(&routeProject, "project", "", "project name (only when no task id is given)")
-	nextCmd.Flags().BoolVar(&routeJSON, "json", false, "print the route as JSON")
-	rootCmd.AddCommand(nextCmd)
+			if routeJSON {
+				return printJSON(newRouteView(r))
+			}
+			printRoute(r)
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&routeProject, "project", "", "project name (only when no task id is given)")
+	cmd.Flags().BoolVar(&allProjects, "all-projects", false, allProjectsUsage)
+	cmd.Flags().BoolVar(&routeJSON, "json", false, "print the route as JSON")
+	return cmd
 }

@@ -6,6 +6,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -62,6 +63,12 @@ type evalRecordOut struct {
 }
 
 func registerNoteEvalTools(s *sdkmcp.Server, st *store.Store) {
+	addNoteListTool(s, st)
+	addNotePromoteTool(s, st)
+	addEvalRecordTool(s, st)
+}
+
+func addNoteListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_note_list",
 		Description: "List captured notes (fast, unstructured capture), oldest first. With unpromoted_only these are the notes awaiting /reflect.",
@@ -84,7 +91,9 @@ func registerNoteEvalTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d note(s)", len(page))), out, nil
 	})
+}
 
+func addNotePromoteTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_note_promote",
 		Description: "Promote a note into a proposed decision or a memory entry. A note can be promoted only once. " +
@@ -99,21 +108,17 @@ func registerNoteEvalTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("note #%d promoted to %s #%d", args.NoteID, args.Kind, id)), notePromoteOut{ID: id, Kind: args.Kind}, nil
 	})
+}
 
+func addEvalRecordTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_eval_record",
 		Description: "Record a measured eval result (pass rate per suite) -- the evidence behind an autonomy promotion.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args evalRecordArgs) (*sdkmcp.CallToolResult, evalRecordOut, error) {
-		if args.TaskID != nil {
-			if _, err := st.GetTask(*args.TaskID); err != nil {
-				return nil, evalRecordOut{}, err
-			}
-		}
-		projectID, err := resolveProject(st, args.Project)
-		if err != nil {
-			return nil, evalRecordOut{}, err
-		}
-		id, err := st.AddEval(args.TaskID, projectID, args.Suite, args.PassRate, args.SampleSize, args.Note)
+		id, err := app.RecordEval(st, app.RecordEvalRequest{
+			TaskID: args.TaskID, Suite: args.Suite, PassRate: args.PassRate, SampleSize: args.SampleSize, Note: args.Note,
+			ProjectArg: args.Project,
+		})
 		if err != nil {
 			return nil, evalRecordOut{}, err
 		}

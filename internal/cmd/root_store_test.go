@@ -4,6 +4,7 @@ import "testing"
 
 func TestNeedsStore(t *testing.T) {
 	// cobra adds these built-ins lazily, at Execute time
+	rootCmd := newRootCmd(newCLI())
 	rootCmd.InitDefaultCompletionCmd()
 	rootCmd.InitDefaultHelpCmd()
 	find := func(path ...string) bool {

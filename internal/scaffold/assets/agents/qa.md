@@ -12,6 +12,5 @@ do not exceed it. Start with `acline brief <id>`.
   tool produces (`--kind eval`), never `human_review`.
 - Failure: `acline task assign <id> developer`. Never approve your own checks.
 
-You have no Edit or Write tool. Shell access is held to read-only by the guard only
-when the session runs as this role (`ACLINE_ROLE=qa` or
-`acline session start --role qa`), so do not use Bash to change files.
+You have no Edit or Write tool, and the guard holds your shell to read-only too: it
+knows this agent is `qa` and denies file writes, so do not use Bash to change files.

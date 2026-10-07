@@ -7,6 +7,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -48,6 +49,10 @@ type roleListOut struct {
 }
 
 func registerRoleTools(s *sdkmcp.Server, st *store.Store) {
+	addRoleListTool(s, st)
+}
+
+func addRoleListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_role_list",
 		Description: "List roles: the global built-ins (developer/qa/designer/manager/scrummaster/architect/security) plus a project's own additions.",
@@ -99,6 +104,11 @@ type sessionCurrentOut struct {
 }
 
 func registerSessionTools(s *sdkmcp.Server, st *store.Store) {
+	addSessionCurrentTool(s, st)
+	addSessionListTool(s, st)
+}
+
+func addSessionCurrentTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_session_current",
 		Description: "Show the active work session, if any. Reports active=false rather than erroring when nothing is running.",
@@ -113,7 +123,9 @@ func registerSessionTools(s *sdkmcp.Server, st *store.Store) {
 		out := toSessionDetailOut(*sess)
 		return textResult(fmt.Sprintf("session #%d active", sess.ID)), sessionCurrentOut{Active: true, Session: &out}, nil
 	})
+}
 
+func addSessionListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_session_list",
 		Description: "List recent work sessions, optionally restricted to a project.",
@@ -173,6 +185,10 @@ type evalListOut struct {
 }
 
 func registerEvalTools(s *sdkmcp.Server, st *store.Store) {
+	addEvalListTool(s, st)
+}
+
+func addEvalListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_eval_list",
 		Description: "List recorded eval results (measured pass rate per suite), newest first -- the evidence behind an autonomy promotion.",
@@ -238,6 +254,12 @@ type roadmapUpdateOut struct {
 }
 
 func registerRoadmapTools(s *sdkmcp.Server, st *store.Store) {
+	addRoadmapListTool(s, st)
+	addRoadmapShowTool(s, st)
+	addRoadmapUpdateTool(s, st)
+}
+
+func addRoadmapListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_roadmap_list",
 		Description: "List milestones with task progress, optionally filtered by status or project.",
@@ -260,7 +282,9 @@ func registerRoadmapTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d milestone(s)", len(milestones))), out, nil
 	})
+}
 
+func addRoadmapShowTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_roadmap_show",
 		Description: "Show one milestone's progress and the tasks assigned to it.",
@@ -283,25 +307,19 @@ func registerRoadmapTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("milestone #%d: %d/%d tasks done", m.ID, progress.Done, progress.Total)), out, nil
 	})
+}
 
+func addRoadmapUpdateTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_roadmap_update",
 		Description: "Update a milestone's status and/or target date. Same as `acline roadmap update`.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args roadmapUpdateArgs) (*sdkmcp.CallToolResult, roadmapUpdateOut, error) {
-		if args.Status == "" && args.Target == "" {
+		err := app.UpdateMilestone(st, args.ID, args.Status, args.Target)
+		if errors.Is(err, app.ErrNothingToUpdate) {
 			return nil, roadmapUpdateOut{}, fmt.Errorf("nothing to update: pass status and/or target")
 		}
-		if args.Status != "" {
-			if err := st.SetMilestoneStatus(args.ID, args.Status); err != nil {
-				return nil, roadmapUpdateOut{}, err
-			}
-			st.LogEventGlobal("milestone_status_change", fmt.Sprintf("milestone #%d -> %s", args.ID, args.Status))
-		}
-		if args.Target != "" {
-			if err := st.SetMilestoneTarget(args.ID, args.Target); err != nil {
-				return nil, roadmapUpdateOut{}, err
-			}
-			st.LogEventGlobal("milestone_target_change", fmt.Sprintf("milestone #%d target -> %s", args.ID, args.Target))
+		if err != nil {
+			return nil, roadmapUpdateOut{}, err
 		}
 		return textResult(fmt.Sprintf("milestone #%d updated", args.ID)), roadmapUpdateOut{ID: args.ID}, nil
 	})

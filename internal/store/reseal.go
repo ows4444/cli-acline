@@ -1,7 +1,6 @@
 package store
 
 import (
-	"database/sql"
 	"errors"
 	"fmt"
 	"regexp"
@@ -167,14 +166,8 @@ func checkLegacyAttestation(q chainQuerier) (attestID int64, reason string, err 
 	return attestID, "", nil
 }
 
-type unsealedRecord struct {
-	table      string
-	id, taskID int64
-	digest     string
-}
-
 // unsealedRecords lists the approvals and checks that have no row_seal.
-func unsealedRecords(q chainQuerier) ([]unsealedRecord, error) {
+func unsealedRecords(q chainQuerier) ([]sealedRecord, error) {
 	sealed := map[string]bool{}
 	rows, err := q.Query(`SELECT message FROM events WHERE type = 'row_seal'`)
 	if err != nil {
@@ -192,41 +185,12 @@ func unsealedRecords(q chainQuerier) ([]unsealedRecord, error) {
 	}
 	rows.Close()
 
-	var out []unsealedRecord
-	collect := func(table, query string, scan func(*sql.Rows) (int64, int64, string, error)) error {
-		rows, err := q.Query(query)
-		if err != nil {
-			return err
+	var out []sealedRecord
+	err = recordDigests(q, func(rec sealedRecord) bool {
+		if !sealed[rec.table+"#"+strconv.FormatInt(rec.id, 10)] {
+			out = append(out, rec)
 		}
-		defer rows.Close()
-		for rows.Next() {
-			id, taskID, dig, err := scan(rows)
-			if err != nil {
-				return err
-			}
-			if !sealed[table+"#"+strconv.FormatInt(id, 10)] {
-				out = append(out, unsealedRecord{table, id, taskID, dig})
-			}
-		}
-		return rows.Err()
-	}
-	if err := collect("approvals", `SELECT id, task_id, kind, approver, decision, COALESCE(note,''), COALESCE(actor_type,''), COALESCE(actor_id,''),
-		COALESCE(model,''), CAST(COALESCE(role_id,'') AS TEXT), created_at FROM approvals ORDER BY id`, func(r *sql.Rows) (int64, int64, string, error) {
-		var id, taskID int64
-		var kind, approver, decision, note, at, aid, model, role, created string
-		err := r.Scan(&id, &taskID, &kind, &approver, &decision, &note, &at, &aid, &model, &role, &created)
-		return id, taskID, approvalDigest(id, taskID, kind, approver, decision, note, at, aid, model, role, created), err
-	}); err != nil {
-		return nil, err
-	}
-	if err := collect("checks", `SELECT id, task_id, kind, status, COALESCE(detail,''), COALESCE(actor_type,''), COALESCE(actor_id,''),
-		CAST(COALESCE(role_id,'') AS TEXT), created_at, source, COALESCE(tree_hash,'') FROM checks ORDER BY id`, func(r *sql.Rows) (int64, int64, string, error) {
-		var id, taskID int64
-		var kind, status, detail, at, aid, role, created, source, tree string
-		err := r.Scan(&id, &taskID, &kind, &status, &detail, &at, &aid, &role, &created, &source, &tree)
-		return id, taskID, checkDigest(id, taskID, kind, status, detail, at, aid, role, created, source, tree), err
-	}); err != nil {
-		return nil, err
-	}
-	return out, nil
+		return true
+	})
+	return out, err
 }

@@ -1,6 +1,7 @@
 package scaffold
 
 import (
+	"acline/internal/roles"
 	"encoding/json"
 	"os"
 	"path/filepath"
@@ -420,12 +421,12 @@ func TestWriteReplacesAStaleAclineHookInsteadOfDuplicatingIt(t *testing.T) {
 }
 
 func TestAgentToolsReadsTheStubsToolList(t *testing.T) {
-	dev, ok := AgentTools("developer")
+	dev, ok := agentTools("developer")
 	if !ok || !slices.Contains(dev, "Edit") || !slices.Contains(dev, "Write") {
 		t.Fatalf("developer tools = %v, %v", dev, ok)
 	}
 	for _, role := range []string{"qa", "security", "architect", "designer"} {
-		tools, ok := AgentTools(role)
+		tools, ok := agentTools(role)
 		if !ok || len(tools) == 0 {
 			t.Fatalf("%s: %v, %v", role, tools, ok)
 		}
@@ -434,8 +435,36 @@ func TestAgentToolsReadsTheStubsToolList(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"manager", "scrummaster", "nope", "", "../agents/qa", "qa.md"} {
-		if tools, ok := AgentTools(name); ok {
-			t.Errorf("AgentTools(%q) = %v, want no stub", name, tools)
+		if tools, ok := agentTools(name); ok {
+			t.Errorf("agentTools(%q) = %v, want no stub", name, tools)
+		}
+	}
+}
+
+// The store and the guard enforce roles.ReadOnly; Claude Code sees the stubs'
+// tool lists. A stub without Edit/Write must be a read-only role there, and the
+// other way round, or the contract a person reads and the one enforced differ.
+func TestAgentStubsAgreeWithTheReadOnlyRoles(t *testing.T) {
+	entries, err := assets.ReadDir("assets/agents")
+	if err != nil {
+		t.Fatal(err)
+	}
+	stubs := map[string]bool{}
+	for _, e := range entries {
+		name := strings.TrimSuffix(e.Name(), ".md")
+		tools, ok := agentTools(name)
+		if !ok {
+			t.Fatalf("%s: no tools line", e.Name())
+		}
+		stubs[name] = true
+		writes := slices.Contains(tools, "Edit") || slices.Contains(tools, "Write")
+		if writes == roles.ReadOnly(name) {
+			t.Errorf("%s: the stub lists Edit/Write = %v, so roles.ReadOnly must be %v", name, writes, !writes)
+		}
+	}
+	for _, name := range roles.ReadOnlyNames() {
+		if !stubs[name] {
+			t.Errorf("read-only role %s has no agent stub", name)
 		}
 	}
 }

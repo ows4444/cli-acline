@@ -40,8 +40,15 @@ func roleStr(roleID *int64) string {
 	return strconv.FormatInt(*roleID, 10)
 }
 
-func approvalDigest(id, taskID int64, kind, approver, decision, note, actorType, actorID, model, role, createdAt string) string {
-	return digest("approvals", strconv.FormatInt(id, 10), strconv.FormatInt(taskID, 10), kind, approver, decision, note, actorType, actorID, model, role, createdAt)
+// approvalDigest seals an approval. One with no tree (every approval written
+// before approvals carried one) keeps the original field list, so its seal still
+// verifies; one with a tree also covers it, so swapping the tree is detected.
+func approvalDigest(id, taskID int64, kind, approver, decision, note, actorType, actorID, model, role, createdAt, tree string) string {
+	fields := []string{"approvals", strconv.FormatInt(id, 10), strconv.FormatInt(taskID, 10), kind, approver, decision, note, actorType, actorID, model, role, createdAt}
+	if tree != "" {
+		fields = append(fields, tree)
+	}
+	return digest(fields...)
 }
 
 // checkDigest seals a check. A check with no extra provenance (a hand-recorded
@@ -180,43 +187,16 @@ func (s *Store) VerifyRecords() (RecordsResult, error) {
 		return true
 	}
 
-	ar, err := s.DB.Query(`SELECT id, task_id, kind, approver, decision, COALESCE(note,''), COALESCE(actor_type,''), COALESCE(actor_id,''),
-		COALESCE(model,''), CAST(COALESCE(role_id,'') AS TEXT), created_at FROM approvals ORDER BY id`)
-	if err != nil {
+	stopped := false
+	if err := recordDigests(s.DB, func(rec sealedRecord) bool {
+		stopped = !check(rec.table, rec.id, rec.digest)
+		return !stopped
+	}); err != nil {
 		return r, err
 	}
-	for ar.Next() {
-		var id, taskID int64
-		var kind, approver, decision, note, at, aid, model, role, created string
-		if err := ar.Scan(&id, &taskID, &kind, &approver, &decision, &note, &at, &aid, &model, &role, &created); err != nil {
-			ar.Close()
-			return r, err
-		}
-		if !check("approvals", id, approvalDigest(id, taskID, kind, approver, decision, note, at, aid, model, role, created)) {
-			ar.Close()
-			return r, nil
-		}
+	if stopped {
+		return r, nil
 	}
-	ar.Close()
-
-	cr, err := s.DB.Query(`SELECT id, task_id, kind, status, COALESCE(detail,''), COALESCE(actor_type,''), COALESCE(actor_id,''),
-		CAST(COALESCE(role_id,'') AS TEXT), created_at, source, COALESCE(tree_hash,'') FROM checks ORDER BY id`)
-	if err != nil {
-		return r, err
-	}
-	for cr.Next() {
-		var id, taskID int64
-		var kind, status, detail, at, aid, role, created, source, tree string
-		if err := cr.Scan(&id, &taskID, &kind, &status, &detail, &at, &aid, &role, &created, &source, &tree); err != nil {
-			cr.Close()
-			return r, err
-		}
-		if !check("checks", id, checkDigest(id, taskID, kind, status, detail, at, aid, role, created, source, tree)) {
-			cr.Close()
-			return r, nil
-		}
-	}
-	cr.Close()
 
 	for ref := range seals {
 		if !seen[ref] {
@@ -225,4 +205,55 @@ func (s *Store) VerifyRecords() (RecordsResult, error) {
 		}
 	}
 	return r, nil
+}
+
+// sealedRecord is one approval or check and the digest its seal must match.
+type sealedRecord struct {
+	table      string
+	id, taskID int64
+	digest     string
+}
+
+// recordDigests calls fn for every approval, then every check, in id order,
+// with the digest of its current content, until fn returns false. It is the one
+// reading of the sealed columns: VerifyRecords compares the digests with the
+// seals, and Reseal seals the records that have none.
+func recordDigests(q chainQuerier, fn func(sealedRecord) bool) error {
+	each := func(query string, scan func(*sql.Rows) (sealedRecord, error)) (bool, error) {
+		rows, err := q.Query(query)
+		if err != nil {
+			return false, err
+		}
+		defer rows.Close()
+		for rows.Next() {
+			rec, err := scan(rows)
+			if err != nil {
+				return false, err
+			}
+			if !fn(rec) {
+				return false, nil
+			}
+		}
+		return true, rows.Err()
+	}
+	more, err := each(`SELECT id, task_id, kind, approver, decision, COALESCE(note,''), COALESCE(actor_type,''), COALESCE(actor_id,''),
+		COALESCE(model,''), CAST(COALESCE(role_id,'') AS TEXT), created_at, COALESCE(tree_hash,'') FROM approvals ORDER BY id`,
+		func(r *sql.Rows) (sealedRecord, error) {
+			var id, taskID int64
+			var kind, approver, decision, note, at, aid, model, role, created, tree string
+			err := r.Scan(&id, &taskID, &kind, &approver, &decision, &note, &at, &aid, &model, &role, &created, &tree)
+			return sealedRecord{"approvals", id, taskID, approvalDigest(id, taskID, kind, approver, decision, note, at, aid, model, role, created, tree)}, err
+		})
+	if err != nil || !more {
+		return err
+	}
+	_, err = each(`SELECT id, task_id, kind, status, COALESCE(detail,''), COALESCE(actor_type,''), COALESCE(actor_id,''),
+		CAST(COALESCE(role_id,'') AS TEXT), created_at, source, COALESCE(tree_hash,'') FROM checks ORDER BY id`,
+		func(r *sql.Rows) (sealedRecord, error) {
+			var id, taskID int64
+			var kind, status, detail, at, aid, role, created, source, tree string
+			err := r.Scan(&id, &taskID, &kind, &status, &detail, &at, &aid, &role, &created, &source, &tree)
+			return sealedRecord{"checks", id, taskID, checkDigest(id, taskID, kind, status, detail, at, aid, role, created, source, tree)}, err
+		})
+	return err
 }

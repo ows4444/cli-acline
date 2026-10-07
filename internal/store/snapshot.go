@@ -110,6 +110,7 @@ func (s *Store) LoadSnapshotWithToken(r io.Reader, token string) (map[string]int
 		return nil, fmt.Errorf("snapshot version %d is newer than this acline build supports (%d) — upgrade acline first", snap.Version, SnapshotVersion)
 	}
 
+	sessionID := s.currentSessionID()
 	if _, err := s.DB.Exec("PRAGMA foreign_keys = OFF"); err != nil {
 		return nil, err
 	}
@@ -134,6 +135,23 @@ func (s *Store) LoadSnapshotWithToken(r io.Reader, token string) (map[string]int
 		if n > 0 {
 			counts[table] = n
 		}
+	}
+
+	// The import itself is recorded, after the imported events so it extends
+	// the chain they leave.
+	var parts []string
+	for _, table := range snapshotTables {
+		if n := counts[table]; n > 0 {
+			parts = append(parts, fmt.Sprintf("%s %d", table, n))
+		}
+	}
+	summary := "nothing new"
+	if len(parts) > 0 {
+		summary = strings.Join(parts, ", ")
+	}
+	if _, err := s.logEventTx(tx, nil, sessionID, nil, "snapshot_imported",
+		fmt.Sprintf("snapshot (version %d, exported %s) imported: %s", snap.Version, snap.ExportedAt, summary)); err != nil {
+		return nil, err
 	}
 
 	// An imported snapshot must leave the audit trail verifiable. Rows are

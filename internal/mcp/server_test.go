@@ -69,8 +69,8 @@ func TestServerListsAllTools(t *testing.T) {
 		"acline_spec_list": true, "acline_spec_add": true, "acline_note_add": true, "acline_log": true,
 		"acline_task_gate": true, "acline_task_done": true, "acline_approve": true, "acline_reject": true,
 		"acline_check_record": true, "acline_check_list": true, "acline_memory_touch": true, "acline_memory_forget": true,
-		"acline_decision_accept": true, "acline_decision_reject": true, "acline_decision_supersede": true,
-		"acline_spec_approve": true, "acline_spec_revise": true,
+		"acline_decision_accept": true, "acline_decision_reject": true, "acline_decision_supersede": true, "acline_decision_deprecate": true,
+		"acline_spec_approve": true, "acline_spec_revise": true, "acline_spec_supersede": true,
 		"acline_dep_add": true, "acline_dep_list": true, "acline_dep_verify": true,
 		"acline_dashboard": true, "acline_metrics": true, "acline_verify": true, "acline_project_list": true,
 	}

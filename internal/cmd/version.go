@@ -74,16 +74,14 @@ func shortVersionString() string {
 	return full[len("acline "):]
 }
 
-var versionCmd = &cobra.Command{
-	Use:   "version",
-	Short: "Print the acline version",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		fmt.Println(buildVersionString())
-		return nil
-	},
-}
-
-func init() {
-	rootCmd.AddCommand(versionCmd)
-	rootCmd.Version = shortVersionString()
+func newVersionCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "version",
+		Short: "Print the acline version",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			fmt.Println(buildVersionString())
+			return nil
+		},
+	}
+	return cmd
 }

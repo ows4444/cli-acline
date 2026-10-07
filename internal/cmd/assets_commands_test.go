@@ -20,7 +20,7 @@ var commandRefRe = regexp.MustCompile("`acline ((?:[a-z][a-z-]*)(?: [a-z][a-z-]*
 // could plausibly be an argument, i.e. it is not a typo'd subcommand of a group
 // that takes none.
 func resolveCommand(words []string) bool {
-	cur := rootCmd
+	cur := newRootCmd(newCLI())
 	i := 0
 	for ; i < len(words); i++ {
 		var next *cobra.Command

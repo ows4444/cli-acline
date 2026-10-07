@@ -6,20 +6,18 @@ import (
 
 	"github.com/spf13/cobra"
 
-	"acline/internal/redact"
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
-var memoryCmd = &cobra.Command{
-	Use:   "memory",
-	Short: "Durable, non-obvious lessons/pitfalls/constraints not derivable from code",
+func newMemoryCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "memory",
+		Short: "Durable, non-obvious lessons/pitfalls/constraints not derivable from code",
+	}
+	cmd.AddCommand(newMemoryAddCmd(c), newMemoryListCmd(c), newMemoryReviewCmd(c), newMemoryApproveCmd(c), newMemoryRejectCmd(c), newMemoryForgetCmd(c), newMemoryRestoreCmd(c), newMemoryTouchCmd(c), newMemoryDecayCmd(c))
+	return cmd
 }
-
-var (
-	memoryArea    string
-	memoryKind    string
-	memoryProject string
-)
 
 // memoryJSONView is the --json view of a store.MemoryEntry: plain types
 // only, so nullable columns serialize as a value or JSON null instead of
@@ -47,174 +45,236 @@ func newMemoryJSONView(m store.MemoryEntry) memoryJSONView {
 	}
 }
 
-var memoryAddCmd = &cobra.Command{
-	Use:   "add <body...>",
-	Short: "Record a durable memory entry (agent-written entries need review)",
-	Args:  cobra.MinimumNArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		body := strings.Join(args, " ")
-		var secretFound bool
-		if redactedBody, found := redact.Secrets(body); found {
-			body = redactedBody
-			secretFound = true
-		}
-		projectID, err := resolveProjectFlag(memoryProject)
-		if err != nil {
-			return err
-		}
-		similar, _ := st.SimilarMemory(body, projectID)
-		id, err := st.AddMemory(memoryArea, memoryKind, body, store.MemoryOpts{ProjectID: projectID})
-		if err != nil {
-			return err
-		}
-		if similar != nil {
-			fmt.Printf("note: memory #%d already says something similar: %s\n", similar.ID, similar.Body)
-		}
-		logEventGlobal("memory_recorded", fmt.Sprintf("memory #%d recorded (%s)", id, memoryKind))
-		if secretFound {
-			logEventGlobal("secret_redacted", fmt.Sprintf("memory #%d: a pasted secret value was redacted before recording", id))
-		}
-		if st.Actor.Type == "agent" {
-			fmt.Printf("memory #%d recorded (pending review)\n", id)
-		} else {
-			fmt.Printf("memory #%d recorded\n", id)
-		}
-		return nil
-	},
+func newMemoryAddCmd(c *cli) *cobra.Command {
+	var (
+		memoryArea    string
+		memoryKind    string
+		memoryProject string
+	)
+	cmd := &cobra.Command{
+		Use:   "add <body...>",
+		Short: "Record a durable memory entry (agent-written entries need review)",
+		Args:  cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			body := strings.Join(args, " ")
+			res, err := app.AddMemory(c.st, app.AddMemoryRequest{
+				Area: memoryArea, Kind: memoryKind, Body: body, ProjectArg: memoryProject, AllowCwdFallback: true,
+			})
+			if err != nil {
+				return err
+			}
+			if res.Similar != nil {
+				fmt.Printf("note: memory #%d already says something similar: %s\n", res.Similar.ID, res.Similar.Body)
+			}
+			if res.Redacted {
+				fmt.Println("note: a pasted secret value was redacted before recording")
+			}
+			if res.Pending {
+				fmt.Printf("memory #%d recorded (pending review)\n", res.ID)
+			} else {
+				fmt.Printf("memory #%d recorded\n", res.ID)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&memoryArea, "area", "", "ownership area this memory applies to")
+	cmd.Flags().StringVar(&memoryKind, "kind", "lesson", "constraint|lesson|pitfall|operational|failure_pattern")
+	cmd.Flags().StringVar(&memoryProject, "project", "", "project name (default: resolved from cwd/ACLINE_PROJECT)")
+	return cmd
 }
 
-var (
-	memoryIncludeStale bool
-	memoryStatusFilter string
-	memoryJSON         bool
-)
-
-var memoryListCmd = &cobra.Command{
-	Use:   "list",
-	Short: "List memory entries",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		projectID, err := resolveProjectFlagOptional(memoryProject)
-		if err != nil {
-			return err
-		}
-		entries, err := st.ListMemory(store.MemoryFilter{
-			Status: memoryStatusFilter, IncludeStale: memoryIncludeStale, ProjectID: projectID,
-		})
-		if err != nil {
-			return err
-		}
-		if memoryJSON {
-			out := make([]memoryJSONView, len(entries))
-			for i, m := range entries {
-				out[i] = newMemoryJSONView(m)
+func newMemoryListCmd(c *cli) *cobra.Command {
+	var (
+		memoryProject      string
+		memoryIncludeStale bool
+		memoryStatusFilter string
+		memoryJSON         bool
+	)
+	var allProjects bool
+	cmd := &cobra.Command{
+		Use:   "list",
+		Short: "List memory entries",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			projectID, err := c.resolveListScope(memoryProject, allProjects)
+			if err != nil {
+				return err
 			}
-			return printJSON(out)
-		}
-		if len(entries) == 0 {
-			fmt.Println("no memory entries")
+			entries, err := c.st.ListMemory(store.MemoryFilter{
+				Status: memoryStatusFilter, IncludeStale: memoryIncludeStale, ProjectID: projectID,
+			})
+			if err != nil {
+				return err
+			}
+			if memoryJSON {
+				out := make([]memoryJSONView, len(entries))
+				for i, m := range entries {
+					out[i] = newMemoryJSONView(m)
+				}
+				return printJSON(out)
+			}
+			if len(entries) == 0 {
+				fmt.Println("no memory entries")
+				return nil
+			}
+			for _, m := range entries {
+				stale := ""
+				if m.Stale {
+					stale = " [stale]"
+				}
+				areaPart := ""
+				if m.Area.Valid {
+					areaPart = " (" + m.Area.String + ")"
+				}
+				status := ""
+				if m.Status != "approved" {
+					status = " {" + m.Status + "}"
+				}
+				fmt.Printf("#%d [%s]%s%s%s %s\n", m.ID, m.Kind, areaPart, status, stale, m.Body)
+			}
 			return nil
-		}
-		for _, m := range entries {
-			stale := ""
-			if m.Stale {
-				stale = " [stale]"
-			}
-			areaPart := ""
-			if m.Area.Valid {
-				areaPart = " (" + m.Area.String + ")"
-			}
-			status := ""
-			if m.Status != "approved" {
-				status = " {" + m.Status + "}"
-			}
-			fmt.Printf("#%d [%s]%s%s%s %s\n", m.ID, m.Kind, areaPart, status, stale, m.Body)
-		}
-		return nil
-	},
+		},
+	}
+	cmd.Flags().BoolVar(&memoryIncludeStale, "all", false, "include entries marked stale")
+	cmd.Flags().StringVarP(&memoryStatusFilter, "status", "s", "", "pending|approved|rejected")
+	cmd.Flags().StringVar(&memoryProject, "project", "", "project name (default: the current project, else every project)")
+	cmd.Flags().BoolVar(&allProjects, "all-projects", false, allProjectsUsage)
+	cmd.Flags().BoolVar(&memoryJSON, "json", false, "print results as a JSON array instead of text")
+	return cmd
 }
 
-var memoryReviewCmd = &cobra.Command{
-	Use:   "review",
-	Short: "Show memory entries awaiting review (drain this at session end)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		entries, err := st.ListMemory(store.MemoryFilter{Status: "pending"})
-		if err != nil {
-			return err
-		}
-		if len(entries) == 0 {
-			fmt.Println("nothing pending review")
-			return nil
-		}
-		fmt.Printf("%d entr%s pending review:\n", len(entries), plural(len(entries), "y", "ies"))
-		for _, m := range entries {
-			by := ""
-			if m.ActorID.Valid {
-				by = " <" + m.ActorID.String + ">"
+func newMemoryReviewCmd(c *cli) *cobra.Command {
+	var (
+		reviewProject string
+		allProjects   bool
+	)
+	cmd := &cobra.Command{
+		Use:   "review",
+		Short: "Show memory entries awaiting review (drain this at session end)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			projectID, err := c.resolveListScope(reviewProject, allProjects)
+			if err != nil {
+				return err
 			}
-			fmt.Printf("  #%d [%s]%s %s\n", m.ID, m.Kind, by, m.Body)
-		}
-		fmt.Println("\napprove with: acline memory approve <id>   reject with: acline memory reject <id>")
-		return nil
-	},
+			entries, err := c.st.ListMemory(store.MemoryFilter{Status: "pending", ProjectID: projectID})
+			if err != nil {
+				return err
+			}
+			if len(entries) == 0 {
+				fmt.Println("nothing pending review")
+				return nil
+			}
+			fmt.Printf("%d entr%s pending review:\n", len(entries), plural(len(entries), "y", "ies"))
+			for _, m := range entries {
+				by := ""
+				if m.ActorID.Valid {
+					by = " <" + m.ActorID.String + ">"
+				}
+				fmt.Printf("  #%d [%s]%s %s\n", m.ID, m.Kind, by, m.Body)
+			}
+			fmt.Println("\napprove with: acline memory approve <id>   reject with: acline memory reject <id>")
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&reviewProject, "project", "", "project name (default: the current project, else every project)")
+	cmd.Flags().BoolVar(&allProjects, "all-projects", false, allProjectsUsage)
+	return cmd
 }
 
 // reviewMemory adapts store.ReviewMemory to runStatusTransition's setter shape.
-func reviewMemory(id int64, status string) error {
-	return withApprovalToken(fmt.Sprintf("memory #%d", id), func(token string) error {
-		return st.ReviewMemory(id, status == "approved", token)
+func (c *cli) reviewMemory(id int64, status string) error {
+	return c.withApprovalToken(fmt.Sprintf("memory #%d", id), func(token string) error {
+		return c.st.ReviewMemory(id, status == "approved", token)
 	})
 }
 
-var memoryApproveCmd = &cobra.Command{
-	Use:   "approve <id>",
-	Short: "Approve a pending memory entry",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runStatusTransition(args, "memory", reviewMemory, "approved", "", "approved")
-	},
+func newMemoryApproveCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "approve <id>",
+		Short: "Approve a pending memory entry",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runStatusTransition(args, "memory", c.reviewMemory, "approved", "approved")
+		},
+	}
+	return cmd
 }
 
-var memoryRejectCmd = &cobra.Command{
-	Use:   "reject <id>",
-	Short: "Reject a pending memory entry",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runStatusTransition(args, "memory", reviewMemory, "rejected", "", "rejected")
-	},
+func newMemoryRejectCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "reject <id>",
+		Short: "Reject a pending memory entry",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return runStatusTransition(args, "memory", c.reviewMemory, "rejected", "rejected")
+		},
+	}
+	return cmd
 }
 
-var memoryForgetCmd = &cobra.Command{
-	Use:   "forget <id>",
-	Short: "Mark a memory entry stale (excluded from default list)",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		id, err := parseID(args[0], "memory")
-		if err != nil {
-			return err
-		}
-		if err := st.SetMemoryStale(id, true); err != nil {
-			return err
-		}
-		fmt.Printf("memory #%d marked stale\n", id)
-		return nil
-	},
+func newMemoryForgetCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "forget <id>",
+		Short: "Mark a memory entry stale, dropping it from context (a person's decision; undo with `memory restore`)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseID(args[0], "memory")
+			if err != nil {
+				return err
+			}
+			if err := c.withApprovalToken(fmt.Sprintf("forgetting memory #%d", id), func(token string) error {
+				return c.st.SetMemoryStaleWithToken(id, true, token)
+			}); err != nil {
+				return err
+			}
+			fmt.Printf("memory #%d marked stale (restore with: acline memory restore %d)\n", id, id)
+			return nil
+		},
+	}
+	return cmd
 }
 
-var memoryTouchCmd = &cobra.Command{
-	Use:   "touch <id>",
-	Short: "Reconfirm a memory entry is still true, resetting its decay clock",
-	Args:  cobra.ExactArgs(1),
-	RunE: func(cmd *cobra.Command, args []string) error {
-		id, err := parseID(args[0], "memory")
-		if err != nil {
-			return err
-		}
-		if err := st.TouchMemory(id); err != nil {
-			return err
-		}
-		fmt.Printf("memory #%d reconfirmed\n", id)
-		return nil
-	},
+func newMemoryRestoreCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "restore <id>",
+		Short: "Undo `memory forget`: make a stale entry live again (a person's decision)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseID(args[0], "memory")
+			if err != nil {
+				return err
+			}
+			if err := c.withApprovalToken(fmt.Sprintf("restoring memory #%d", id), func(token string) error {
+				return c.st.SetMemoryStaleWithToken(id, false, token)
+			}); err != nil {
+				return err
+			}
+			fmt.Printf("memory #%d restored\n", id)
+			return nil
+		},
+	}
+	return cmd
+}
+
+func newMemoryTouchCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "touch <id>",
+		Short: "Reconfirm a memory entry is still true, resetting its decay clock (a person's decision)",
+		Args:  cobra.ExactArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			id, err := parseID(args[0], "memory")
+			if err != nil {
+				return err
+			}
+			if err := c.withApprovalToken(fmt.Sprintf("reconfirming memory #%d", id), func(token string) error {
+				return c.st.TouchMemoryWithToken(id, token)
+			}); err != nil {
+				return err
+			}
+			fmt.Printf("memory #%d reconfirmed\n", id)
+			return nil
+		},
+	}
+	return cmd
 }
 
 // defaultMemoryDecayDays is how long an approved memory entry can go
@@ -225,42 +285,48 @@ var memoryTouchCmd = &cobra.Command{
 // couple of times a year.
 const defaultMemoryDecayDays = store.DefaultMemoryDecayDays
 
-var (
-	memoryDecayDays    int
-	memoryDecayProject string
-)
-
-var memoryDecayCmd = &cobra.Command{
-	Use:   "decay",
-	Short: "List approved memory entries not reconfirmed in --days days (default 90)",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		projectID, err := resolveProjectFlagOptional(memoryDecayProject)
-		if err != nil {
-			return err
-		}
-		entries, err := st.DecayCandidates(memoryDecayDays, projectID)
-		if err != nil {
-			return err
-		}
-		if len(entries) == 0 {
-			fmt.Printf("nothing older than %d days awaiting reconfirmation\n", memoryDecayDays)
+func newMemoryDecayCmd(c *cli) *cobra.Command {
+	var (
+		memoryDecayDays    int
+		memoryDecayProject string
+	)
+	var allProjects bool
+	cmd := &cobra.Command{
+		Use:   "decay",
+		Short: "List approved memory entries not reconfirmed in --days days (default 90)",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			projectID, err := c.resolveListScope(memoryDecayProject, allProjects)
+			if err != nil {
+				return err
+			}
+			entries, err := c.st.DecayCandidates(memoryDecayDays, projectID)
+			if err != nil {
+				return err
+			}
+			if len(entries) == 0 {
+				fmt.Printf("nothing older than %d days awaiting reconfirmation\n", memoryDecayDays)
+				return nil
+			}
+			fmt.Printf("%d entr%s not reconfirmed in %d+ days:\n", len(entries), plural(len(entries), "y", "ies"), memoryDecayDays)
+			for _, m := range entries {
+				areaPart := ""
+				if m.Area.Valid {
+					areaPart = " (" + m.Area.String + ")"
+				}
+				last := m.CreatedAt
+				if m.ReviewedAt.Valid {
+					last = m.ReviewedAt.String
+				}
+				fmt.Printf("  #%-4d [%s]%s last confirmed %s: %s\n", m.ID, m.Kind, areaPart, last, m.Body)
+			}
+			fmt.Println("\nreconfirm with: acline memory touch <id>   mark stale with: acline memory forget <id>")
 			return nil
-		}
-		fmt.Printf("%d entr%s not reconfirmed in %d+ days:\n", len(entries), plural(len(entries), "y", "ies"), memoryDecayDays)
-		for _, m := range entries {
-			areaPart := ""
-			if m.Area.Valid {
-				areaPart = " (" + m.Area.String + ")"
-			}
-			last := m.CreatedAt
-			if m.ReviewedAt.Valid {
-				last = m.ReviewedAt.String
-			}
-			fmt.Printf("  #%-4d [%s]%s last confirmed %s: %s\n", m.ID, m.Kind, areaPart, last, m.Body)
-		}
-		fmt.Println("\nreconfirm with: acline memory touch <id>   mark stale with: acline memory forget <id>")
-		return nil
-	},
+		},
+	}
+	cmd.Flags().IntVar(&memoryDecayDays, "days", defaultMemoryDecayDays, "minimum days since last reconfirmation")
+	cmd.Flags().StringVar(&memoryDecayProject, "project", "", "project name (default: the current project, else every project)")
+	cmd.Flags().BoolVar(&allProjects, "all-projects", false, allProjectsUsage)
+	return cmd
 }
 
 func plural(n int, one, many string) string {
@@ -268,21 +334,4 @@ func plural(n int, one, many string) string {
 		return one
 	}
 	return many
-}
-
-func init() {
-	memoryAddCmd.Flags().StringVar(&memoryArea, "area", "", "ownership area this memory applies to")
-	memoryAddCmd.Flags().StringVar(&memoryKind, "kind", "lesson", "constraint|lesson|pitfall|operational|failure_pattern")
-	memoryAddCmd.Flags().StringVar(&memoryProject, "project", "", "project name (default: resolved from cwd/ACLINE_PROJECT)")
-
-	memoryListCmd.Flags().BoolVar(&memoryIncludeStale, "all", false, "include entries marked stale")
-	memoryListCmd.Flags().StringVarP(&memoryStatusFilter, "status", "s", "", "pending|approved|rejected")
-	memoryListCmd.Flags().StringVar(&memoryProject, "project", "", "filter by project name")
-	memoryListCmd.Flags().BoolVar(&memoryJSON, "json", false, "print results as a JSON array instead of text")
-
-	memoryDecayCmd.Flags().IntVar(&memoryDecayDays, "days", defaultMemoryDecayDays, "minimum days since last reconfirmation")
-	memoryDecayCmd.Flags().StringVar(&memoryDecayProject, "project", "", "filter by project name")
-
-	memoryCmd.AddCommand(memoryAddCmd, memoryListCmd, memoryReviewCmd, memoryApproveCmd, memoryRejectCmd, memoryForgetCmd, memoryTouchCmd, memoryDecayCmd)
-	rootCmd.AddCommand(memoryCmd)
 }

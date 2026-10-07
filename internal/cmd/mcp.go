@@ -12,47 +12,58 @@ import (
 	aclinemcp "acline/internal/mcp"
 )
 
-var mcpCmd = &cobra.Command{
-	Use:   "mcp",
-	Short: "Run acline as an MCP (Model Context Protocol) server",
+func newMcpCmd(c *cli) *cobra.Command {
+	cmd := &cobra.Command{
+		Use:   "mcp",
+		Short: "Run acline as an MCP (Model Context Protocol) server",
+	}
+	cmd.AddCommand(newMcpServeCmd(c))
+	return cmd
 }
 
-var mcpServeCmd = &cobra.Command{
-	Use:   "serve",
-	Short: "Serve acline's search/browse/capture tools over MCP on stdio",
-	Long: "Exposes acline's store (search, memory, tasks, decisions, specs, notes/log, and the audit " +
-		"trail) as MCP tools/resources over stdio, for any MCP-compatible client (Claude Desktop, " +
-		"another agent, an editor extension) — not just Claude Code's hook-based integration. " +
-		"Semantic search is available exactly when VOYAGE_API_KEY is set on this process, same as " +
-		"the CLI's `search --semantic`. The server records writes under one identity, which must be " +
-		"declared: `--as human` for an editor a person drives, `--as agent` for an agent's client, " +
-		"or ACLINE_ACTOR_TYPE / ACLINE_MODEL in the environment. `--as` cannot turn an agent " +
-		"environment into a person.",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		actorType, err := mcpServeActorType(mcpAs, os.Getenv)
-		if err != nil {
-			return err
-		}
-		st.Actor.Type = actorType
-		toolset := mcpToolset
-		if toolset == "" {
-			toolset = aclinemcp.DefaultToolset(st.Actor)
-		}
-		server, err := aclinemcp.NewServerWithToolset(st, toolset)
-		if err != nil {
-			return err
-		}
-		ctx, cancel := context.WithCancel(cmd.Context())
-		defer cancel()
-		go aclinemcp.WatchStore(ctx, server, st, 2*time.Second)
-		if err := server.Run(ctx, &sdkmcp.StdioTransport{}); err != nil {
-			return fmt.Errorf("mcp server: %w", err)
-		}
-		return nil
-	},
+func newMcpServeCmd(c *cli) *cobra.Command {
+	var (
+		mcpToolset string
+		mcpAs      string
+	)
+	cmd := &cobra.Command{
+		Use:   "serve",
+		Short: "Serve acline's search/browse/capture tools over MCP on stdio",
+		Long: "Exposes acline's store (search, memory, tasks, decisions, specs, notes/log, and the audit " +
+			"trail) as MCP tools/resources over stdio, for any MCP-compatible client (Claude Desktop, " +
+			"another agent, an editor extension) — not just Claude Code's hook-based integration. " +
+			"Semantic search is available exactly when VOYAGE_API_KEY is set on this process, same as " +
+			"the CLI's `search --semantic`. The server records writes under one identity, which must be " +
+			"declared: `--as human` for an editor a person drives, `--as agent` for an agent's client, " +
+			"or ACLINE_ACTOR_TYPE / ACLINE_MODEL in the environment. `--as` cannot turn an agent " +
+			"environment into a person.",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			actorType, err := mcpServeActorType(mcpAs, os.Getenv)
+			if err != nil {
+				return err
+			}
+			c.st.Actor.Type = actorType
+			toolset := mcpToolset
+			if toolset == "" {
+				toolset = aclinemcp.DefaultToolset(c.st.Actor)
+			}
+			server, err := aclinemcp.NewServerWithToolset(c.st, toolset)
+			if err != nil {
+				return err
+			}
+			ctx, cancel := context.WithCancel(cmd.Context())
+			defer cancel()
+			go aclinemcp.WatchStore(ctx, server, c.st, 2*time.Second)
+			if err := server.Run(ctx, &sdkmcp.StdioTransport{}); err != nil {
+				return fmt.Errorf("mcp server: %w", err)
+			}
+			return nil
+		},
+	}
+	cmd.Flags().StringVar(&mcpAs, "as", "", "identity to record writes under when the environment doesn't declare one: human or agent")
+	cmd.Flags().StringVar(&mcpToolset, "toolset", "", "tools to expose: read, capture (read + recording work, no approvals/decisions) or all (default: capture for an agent actor, all for a person)")
+	return cmd
 }
-
-var mcpToolset, mcpAs string
 
 // mcpServeActorType decides who a server records writes as. An undeclared
 // identity used to mean "a person", so any client that forgot to say it was an
@@ -81,11 +92,4 @@ func mcpServeActorType(as string, getenv func(string) string) (string, error) {
 	default:
 		return "", fmt.Errorf("--as %s conflicts with ACLINE_ACTOR_TYPE=%s", as, env)
 	}
-}
-
-func init() {
-	mcpServeCmd.Flags().StringVar(&mcpAs, "as", "", "identity to record writes under when the environment doesn't declare one: human or agent")
-	mcpServeCmd.Flags().StringVar(&mcpToolset, "toolset", "", "tools to expose: read, capture (read + recording work, no approvals/decisions) or all (default: capture for an agent actor, all for a person)")
-	mcpCmd.AddCommand(mcpServeCmd)
-	rootCmd.AddCommand(mcpCmd)
 }

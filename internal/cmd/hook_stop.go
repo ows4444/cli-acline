@@ -29,22 +29,18 @@ import (
 // stop_hook_active (set when the agent is already continuing because of a Stop
 // hook) also lets it end, so the hook can never loop.
 
-// stopTreeTimeout bounds the working-tree hash; past it the turn ends unblocked.
-var stopTreeTimeout = 5 * time.Second
-
-// stopTree fingerprints the working tree; a variable so tests can fix it.
-var stopTree = currentTree
-
-var hookStopCmd = &cobra.Command{
-	Use:   "stop",
-	Short: "Stop: record MEMORY_LOG lines, and flag checks that predate the agent's last edit",
-	Args:  cobra.NoArgs,
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return runStop(os.Stdin, os.Stdout, enterProjectDir())
-	},
+func newHookStopCmd(c *cli) *cobra.Command {
+	return &cobra.Command{
+		Use:   "stop",
+		Short: "Stop: record MEMORY_LOG lines, and flag checks that predate the agent's last edit",
+		Args:  cobra.NoArgs,
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return c.runStop(os.Stdin, os.Stdout, enterProjectDir())
+		},
+	}
 }
 
-func runStop(in io.Reader, out io.Writer, projectDir string) error {
+func (c *cli) runStop(in io.Reader, out io.Writer, projectDir string) error {
 	var payload struct {
 		SessionID      string `json:"session_id"`
 		TranscriptPath string `json:"transcript_path"`
@@ -56,12 +52,12 @@ func runStop(in io.Reader, out io.Writer, projectDir string) error {
 		sessionID = "unknown"
 	}
 	state := filepath.Join(projectDir, ".claude", "vault", ".state", "memory-log-captured.json")
-	captureMemoryLog(sessionID, payload.TranscriptPath, state, projectDir)
+	c.captureMemoryLog(sessionID, payload.TranscriptPath, state, projectDir)
 
 	if payload.StopHookActive {
 		return nil
 	}
-	reason := staleCheckReason(st)
+	reason := c.staleCheckReason()
 	if reason == "" {
 		return nil
 	}
@@ -69,7 +65,8 @@ func runStop(in io.Reader, out io.Writer, projectDir string) error {
 }
 
 // staleCheckReason says why the turn should not end yet, or "" to let it end.
-func staleCheckReason(s *store.Store) string {
+func (c *cli) staleCheckReason() string {
+	s, tree, timeout := c.st, c.stopTree, c.stopTreeTimeout
 	if s == nil {
 		return ""
 	}
@@ -99,7 +96,7 @@ func staleCheckReason(s *store.Store) string {
 	if len(trees) == 0 {
 		return ""
 	}
-	now := hashWithin(stopTreeTimeout)
+	now := hashWithin(tree, timeout)
 	if now == "" {
 		return ""
 	}
@@ -129,9 +126,8 @@ func sameProject(s *store.Store, sess *store.Session) bool {
 	return sess.ProjectID.Valid && sess.ProjectID.Int64 == p.ID
 }
 
-// hashWithin runs stopTree, or returns "" if it takes longer than timeout.
-func hashWithin(timeout time.Duration) string {
-	tree := stopTree
+// hashWithin runs tree, or returns "" if it takes longer than timeout.
+func hashWithin(tree func() string, timeout time.Duration) string {
 	done := make(chan string, 1)
 	go func() { done <- tree() }()
 	select {
@@ -140,8 +136,4 @@ func hashWithin(timeout time.Duration) string {
 	case <-time.After(timeout):
 		return ""
 	}
-}
-
-func init() {
-	hookCmd.AddCommand(hookStopCmd)
 }

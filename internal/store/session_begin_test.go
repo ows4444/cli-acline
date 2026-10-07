@@ -33,14 +33,15 @@ func TestBeginSessionFailureLeavesTheTaskAlone(t *testing.T) {
 	if _, err := s.DB.Exec(`CREATE TRIGGER no_sess BEFORE INSERT ON sessions BEGIN SELECT RAISE(ABORT,'no'); END`); err != nil {
 		t.Fatal(err)
 	}
+	events := count(t, s, `SELECT COUNT(*) FROM events`) // task_created
 	if _, err := s.BeginSession(SessionStart{TaskID: &id}); err == nil {
 		t.Fatal("expected failure")
 	}
 	if got, _ := s.GetTask(id); got.Status != "todo" {
 		t.Errorf("task left %q after a failed session start", got.Status)
 	}
-	if n := count(t, s, `SELECT COUNT(*) FROM events`); n != 0 {
-		t.Errorf("%d event(s) survived the rollback", n)
+	if n := count(t, s, `SELECT COUNT(*) FROM events`); n != events {
+		t.Errorf("%d event(s) survived the rollback", n-events)
 	}
 }
 

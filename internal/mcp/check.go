@@ -7,7 +7,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
-	"acline/internal/checkrun"
+	"acline/internal/app"
 	"acline/internal/store"
 	"acline/internal/worktree"
 )
@@ -51,73 +51,50 @@ type checkListOut struct {
 }
 
 func registerCheckTools(s *sdkmcp.Server, st *store.Store) {
+	addCheckRecordTool(s, st)
+	addCheckRunTool(s, st)
+	addCheckListTool(s, st)
+}
+
+func addCheckRecordTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_check_record",
 		Description: "Record a verification result (test/sast/sca/lint/human_review/eval) against a task. Checks are append-only -- the newest result for a kind is what the completion gate looks at.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args checkRecordArgs) (*sdkmcp.CallToolResult, checkRecordOut, error) {
-		if _, err := st.GetTask(args.TaskID); err != nil {
-			return nil, checkRecordOut{}, err
-		}
-		roleID, err := resolveRole(st, args.Role, args.Project)
+		cid, err := app.RecordCheck(st, app.RecordCheckRequest{
+			TaskID: args.TaskID, Kind: args.Kind, Status: args.Status, Detail: args.Detail, Token: args.Token,
+			RoleArg: args.Role, ProjectArg: args.Project, Hash: worktree.Hash,
+		})
 		if err != nil {
 			return nil, checkRecordOut{}, err
 		}
-		cid, err := st.AddCheckWithMeta(args.TaskID, roleID, args.Kind, args.Status, args.Detail, args.Token,
-			store.CheckMeta{Source: store.CheckSourceManual, TreeHash: treeForTask(st, args.TaskID)})
-		if err != nil {
-			return nil, checkRecordOut{}, err
-		}
-		st.LogTaskEvent(args.TaskID, "check", fmt.Sprintf("%s: %s", args.Kind, args.Status))
 		return textResult(fmt.Sprintf("check #%d recorded: %s %s", cid, args.Kind, args.Status)), checkRecordOut{ID: cid}, nil
 	})
+}
 
+func addCheckRunTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_check_run",
 		Description: "Run the default tool for a check kind (test|sast|sca|lint) in the task's project directory (the server's working directory for a task with no registered project) and record its real result: " +
 			"pass only on exit 0, fail on a non-zero exit or timeout, skipped when the tool is not installed or the project has no default runner. " +
 			"There is deliberately no command argument: an agent cannot choose what runs (a project's runner is set by a human via `acline check runner set`).",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args checkRunArgs) (*sdkmcp.CallToolResult, checkRunOut, error) {
-		task, err := st.GetTask(args.TaskID)
-		if err != nil {
-			return nil, checkRunOut{}, err
-		}
-		roleID, err := resolveRole(st, args.Role, args.Project)
-		if err != nil {
-			return nil, checkRunOut{}, err
-		}
-		// The task's project directory, not the server's cwd: the tree sealed with
-		// the result below is fingerprinted from the same place.
-		dir, err := dirForTask(st, args.TaskID)
-		if err != nil {
-			return nil, checkRunOut{}, err
-		}
-		// The command is never the caller's: it is the project's human-configured
-		// runner if there is one, else the built-in default.
-		command, err := st.CheckRunnerCommand(nullIntPtr(task.ProjectID), args.Kind)
-		if err != nil {
-			return nil, checkRunOut{}, err
-		}
+		// There is no command argument: the command is the project's
+		// human-configured runner if there is one, else the built-in default.
 		stopProgress := reportProgress(ctx, req, "running "+args.Kind)
-		res, err := checkrun.Run(ctx, args.Kind, dir, command, 0)
+		cid, res, err := app.RunCheck(ctx, st, app.RunCheckRequest{
+			TaskID: args.TaskID, Kind: args.Kind, RoleArg: args.Role, ProjectArg: args.Project, Hash: worktree.Hash,
+		})
 		stopProgress()
 		if err != nil {
 			return nil, checkRunOut{}, err
 		}
-		tree := worktree.Hash(dir)
-		detail := res.Detail
-		if tree == "" {
-			detail += store.UnboundTreeNote
-		}
-		cid, err := st.AddCheckWithMeta(args.TaskID, roleID, args.Kind, res.Status, detail, "",
-			store.CheckMeta{Source: store.CheckSourceRunner, TreeHash: tree})
-		if err != nil {
-			return nil, checkRunOut{}, err
-		}
-		st.LogTaskEvent(args.TaskID, "check", fmt.Sprintf("%s: %s", args.Kind, res.Status))
 		return textResult(fmt.Sprintf("check #%d recorded: %s %s", cid, args.Kind, res.Status)),
 			checkRunOut{ID: cid, Status: res.Status, Detail: res.Detail}, nil
 	})
+}
 
+func addCheckListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_check_list",
 		Description: "List verification results recorded against a task.",

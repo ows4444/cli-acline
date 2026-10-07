@@ -68,15 +68,24 @@ func (s *Store) AddRoleWithToken(projectID int64, name, kind string, canApprove 
 		return 0, fmt.Errorf("invalid role kind %q (want: human|agent|both)", kind)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
-		`INSERT INTO roles (project_id, name, kind, can_approve, stage_order, description, created_at)
-		 VALUES (?, ?, ?, ?, ?, ?, ?)`,
-		projectID, name, kind, boolToInt(canApprove), nullInt(stageOrder), nullStr(description), now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	var id int64
+	err := s.writeWithEvent(nil, "role_added", func(tx *sql.Tx) (string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO roles (project_id, name, kind, can_approve, stage_order, description, created_at)
+			 VALUES (?, ?, ?, ?, ?, ?, ?)`,
+			projectID, name, kind, boolToInt(canApprove), nullInt(stageOrder), nullStr(description), now,
+		)
+		if err != nil {
+			return "", err
+		}
+		id, err = res.LastInsertId()
+		msg := fmt.Sprintf("role #%d %s added to project #%d (%s)", id, name, projectID, kind)
+		if canApprove {
+			msg += ", can approve"
+		}
+		return msg, err
+	})
+	return id, err
 }
 
 // ListRoles returns every role visible to projectID: the 7 global roles

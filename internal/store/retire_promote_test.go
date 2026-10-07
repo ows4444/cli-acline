@@ -2,6 +2,7 @@ package store
 
 import (
 	"errors"
+	"strconv"
 	"testing"
 )
 
@@ -119,5 +120,46 @@ func TestAgentCannotLowerThePromotionThreshold(t *testing.T) {
 	}
 	if err := h.PromoteAutonomy(id, "auto", "suite", 0.5); err != nil {
 		t.Fatalf("a person may set the bar: %v", err)
+	}
+}
+
+// The eval a promotion cites was the latest of that suite anywhere in the
+// shared store, so a measurement of one project's work promoted another's task.
+// It now has to be the latest of that suite in the task's own project.
+func TestPromotionCitesAnEvalFromTheTasksOwnProject(t *testing.T) {
+	h := humanStore(t)
+	a, _ := h.AddProject("a", "", "")
+	b, _ := h.AddProject("b", "", "")
+	inA, _ := h.AddTask("in a", "", "normal", TaskOpts{Autonomy: "hitl", ProjectID: &a})
+	inB, _ := h.AddTask("in b", "", "normal", TaskOpts{Autonomy: "hitl", ProjectID: &b})
+	if _, err := h.AddEval(&inA, &a, "suite", 0.99, 100, "measured on a"); err != nil {
+		t.Fatal(err)
+	}
+	for _, s := range []*Store{asAgent(h), h} {
+		if err := s.PromoteAutonomy(inB, "auto", "suite", 0.9); err == nil {
+			t.Fatalf("%s: project a's eval promoted a task in project b", s.Actor.Type)
+		}
+	}
+	if task, _ := h.GetTask(inB); task.Autonomy != "hitl" {
+		t.Fatalf("autonomy = %s", task.Autonomy)
+	}
+	// A low score in b is b's latest, even though a's is newer.
+	if _, err := h.AddEval(nil, &b, "suite", 0.5, 100, "measured on b"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := h.AddEval(&inA, &a, "suite", 1.0, 100, "a again"); err != nil {
+		t.Fatal(err)
+	}
+	if err := asAgent(h).PromoteAutonomy(inB, "auto", "suite", 0.9); err == nil {
+		t.Fatal("b's own low score was ignored in favour of a's")
+	}
+	if _, err := h.AddEval(nil, &b, "suite", 0.95, 100, "b improved"); err != nil {
+		t.Fatal(err)
+	}
+	if err := asAgent(h).PromoteAutonomy(inB, "auto", "suite", 0.9); err != nil {
+		t.Fatalf("b's own passing eval = %v", err)
+	}
+	if n := count(t, h, `SELECT COUNT(*) FROM events WHERE type = 'autonomy_promoted' AND task_id = `+strconv.FormatInt(inB, 10)); n != 1 {
+		t.Errorf("autonomy_promoted events = %d, want 1", n)
 	}
 }

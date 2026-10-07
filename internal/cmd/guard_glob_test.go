@@ -29,16 +29,16 @@ func TestSecretGlob(t *testing.T) {
 }
 
 func TestGuardCheckToolDeniesAGrepGlobThatReachesSecrets(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
 	for _, payload := range []string{
 		`{"tool_name":"Grep","tool_input":{"pattern":".","path":".","glob":"**/.env*","output_mode":"content"}}`,
 		`{"tool_name":"Grep","tool_input":{"pattern":"KEY","glob":"*.pem"}}`,
 	} {
-		if out := runGuardCheckTool(t, payload); !strings.Contains(out, `"permissionDecision":"deny"`) {
+		if out := runGuardCheckTool(t, c, payload); !strings.Contains(out, `"permissionDecision":"deny"`) {
 			t.Errorf("expected deny for %s, got %q", payload, out)
 		}
 	}
-	if out := runGuardCheckTool(t, `{"tool_name":"Grep","tool_input":{"pattern":"func main","path":".","glob":"**/*.go","output_mode":"content"}}`); strings.TrimSpace(out) != "" {
+	if out := runGuardCheckTool(t, c, `{"tool_name":"Grep","tool_input":{"pattern":"func main","path":".","glob":"**/*.go","output_mode":"content"}}`); strings.TrimSpace(out) != "" {
 		t.Errorf("an ordinary glob was denied: %q", out)
 	}
 }

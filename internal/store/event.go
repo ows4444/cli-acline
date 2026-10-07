@@ -10,6 +10,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"acline/internal/redact"
 )
 
 type Event struct {
@@ -27,26 +29,10 @@ type Event struct {
 	Hash      sql.NullString
 }
 
-var ValidEventTypes = map[string]bool{
-	"note": true, "decision": true, "bug": true,
-	"commit": true, "blocker": true, "status_change": true,
-	"decision_recorded": true, "memory_recorded": true,
-	"feature_status_change": true, "archived": true,
-	"approval": true, "override": true, "check": true,
-	"spec_recorded": true, "dependency_added": true,
-	"autonomy_promoted": true, "eval_recorded": true,
-	"policy_violation": true, "guard_denied": true, "role_assigned": true,
-	"row_seal": true, "seal_watermark": true, "dispatch": true,
-	"spec_revised": true, "risk_changed": true, "autonomy_changed": true,
-	"project_added": true, "hash_version": true, "tool_used": true, "task_updated": true, "task_deferred": true, "criterion_added": true, "criterion_checked": true, "link_added": true, "check_runner_set": true,
-	"plan_proposed": true, "plan_edited": true, "plan_approved": true, "plan_rejected": true,
-	headSealEvent: true, legacyAttestedEvent: true,
-}
-
 // UserLogTypes are the event types a user or agent may record directly via
-// `acline log` or the MCP acline_log tool. Everything else in
-// ValidEventTypes (approval, override, guard_denied, ...) is written only by
-// the command that performs that action, so a direct log can't forge one.
+// `acline log` or the MCP acline_log tool. Every other type (approval,
+// override, guard_denied, ...) is written only by the store operation that
+// performs that action, so a direct log can't forge one.
 var UserLogTypes = map[string]bool{
 	"note": true, "decision": true, "bug": true, "commit": true, "blocker": true,
 }
@@ -168,9 +154,43 @@ func (s *Store) LogEvent(taskID *int64, sessionID *int64, eventType, message str
 // `note add`'s promotion path). role_id is covered by eventHashV2, which
 // applies only after the chain's hash_version marker, so rows hashed before
 // it (without role_id) still verify.
+//
+// It is the path for events a person or an agent records by hand, so it takes
+// only UserLogTypes: the others are written by the action they record, and a
+// hand-written approval or override would forge that action's trail.
 func (s *Store) LogEventWithRole(taskID, sessionID, roleID *int64, eventType, message string) (int64, error) {
-	return s.logEvent(taskID, sessionID, roleID, eventType, message)
+	if !UserLogTypes[eventType] {
+		return 0, fmt.Errorf("%w: %q (want note, decision, bug, commit or blocker)", ErrNotAUserLogType, eventType)
+	}
+	if taskID != nil {
+		if _, err := s.GetTask(*taskID); err != nil {
+			return 0, err
+		}
+	}
+	// A redacted message is noted by a secret_redacted event in the same
+	// transaction, as for a new spec, decision or memory entry.
+	redacted := redact.Fields(&message)
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	id, err := s.logEventTx(tx, taskID, sessionID, roleID, eventType, message)
+	if err != nil {
+		return 0, err
+	}
+	if redacted {
+		if _, err := s.logEventTx(tx, taskID, sessionID, roleID, "secret_redacted",
+			fmt.Sprintf("log event #%d: a pasted secret value was redacted before recording", id)); err != nil {
+			return 0, err
+		}
+	}
+	return id, tx.Commit()
 }
+
+// ErrNotAUserLogType is returned when a hand-recorded event names a type only
+// acline's own actions write.
+var ErrNotAUserLogType = errors.New("not an event type that can be logged by hand")
 
 func (s *Store) logEvent(taskID *int64, sessionID *int64, roleID *int64, eventType, message string) (int64, error) {
 	tx, err := s.DB.Begin()

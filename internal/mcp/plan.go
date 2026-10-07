@@ -45,6 +45,33 @@ type planProposeArgs struct {
 	Items  []planItemArgs `json:"items" jsonschema:"the proposed tasks (1 to 30)"`
 }
 
+type planReviseArgs struct {
+	ID    int64          `json:"id" jsonschema:"the draft plan to replace"`
+	Note  string         `json:"note,omitempty" jsonschema:"why this breakdown, for the reviewer"`
+	Items []planItemArgs `json:"items" jsonschema:"the whole revised task list (1 to 30); it replaces the draft's items"`
+}
+
+type planReviseOut struct {
+	ID         int64  `json:"id"`
+	Supersedes int64  `json:"supersedes"`
+	Status     string `json:"status"`
+	Items      int    `json:"items"`
+	Next       string `json:"next"`
+}
+
+// planInput is the store's form of a proposed or revised plan.
+func planInput(note string, items []planItemArgs) store.PlanInput {
+	in := store.PlanInput{Note: note}
+	for _, it := range items {
+		in.Items = append(in.Items, store.PlanItemInput{
+			Ref: it.Ref, Title: it.Title, Description: it.Description, Area: it.Area, Type: it.Type, Risk: it.Risk,
+			Autonomy: it.Autonomy, Parent: it.Parent, Milestone: it.Milestone, Size: it.Size,
+			DependsOn: it.DependsOn, Criteria: it.Criteria,
+		})
+	}
+	return in
+}
+
 type planProposeOut struct {
 	ID     int64  `json:"id"`
 	Status string `json:"status"`
@@ -165,21 +192,24 @@ func requirePlanToken(st *store.Store) error {
 }
 
 func registerPlanTools(s *sdkmcp.Server, st *store.Store) {
+	addPlanProposeTool(s, st)
+	addPlanReviseTool(s, st)
+	addPlanListTool(s, st)
+	addPlanShowTool(s, st)
+	addPlanApproveTool(s, st)
+	addPlanEditItemTool(s, st)
+	addPlanRejectTool(s, st)
+}
+
+func addPlanProposeTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_plan_propose",
 		Description: "Propose a task graph (a plan) for an approved spec. This only records a DRAFT: nothing becomes a task, and nothing can be " +
-			"routed or launched, until a person approves it (`acline plan approve`). There is no tool to approve, edit or reject a plan. " +
+			"routed or launched, until a person approves it (`acline plan approve`, or acline_plan_approve with the approval token). " +
 			"Items refer to each other by ref; dependencies must not form a cycle; a plan cannot grant autonomy 'auto'; at most 30 items. " +
 			"A spec can have one draft at a time.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args planProposeArgs) (*sdkmcp.CallToolResult, planProposeOut, error) {
-		in := store.PlanInput{Note: args.Note}
-		for _, it := range args.Items {
-			in.Items = append(in.Items, store.PlanItemInput{
-				Ref: it.Ref, Title: it.Title, Description: it.Description, Area: it.Area, Type: it.Type, Risk: it.Risk,
-				Autonomy: it.Autonomy, Parent: it.Parent, Milestone: it.Milestone, Size: it.Size,
-				DependsOn: it.DependsOn, Criteria: it.Criteria,
-			})
-		}
+		in := planInput(args.Note, args.Items)
 		id, err := st.ProposePlan(args.SpecID, in)
 		if err != nil {
 			return nil, planProposeOut{}, err
@@ -187,7 +217,26 @@ func registerPlanTools(s *sdkmcp.Server, st *store.Store) {
 		out := planProposeOut{ID: id, Status: "draft", Items: len(in.Items), Next: "a person reviews it with `acline plan show " + fmt.Sprint(id) + "` and approves or rejects it"}
 		return textResult(fmt.Sprintf("plan #%d proposed for spec #%d (%d items); it is a draft until a person approves it", id, args.SpecID, len(in.Items))), out, nil
 	})
+}
 
+func addPlanReviseTool(s *sdkmcp.Server, st *store.Store) {
+	addTool(s, &sdkmcp.Tool{
+		Name: "acline_plan_revise",
+		Description: "Replace a DRAFT plan with a new version (as `acline plan revise`): the draft is marked superseded and the new one, " +
+			"planned against the spec's current text, is a draft until a person approves it. Send the whole item list, not a change. " +
+			"An approved, rejected or superseded plan cannot be revised. The same rules as acline_plan_propose apply.",
+	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args planReviseArgs) (*sdkmcp.CallToolResult, planReviseOut, error) {
+		in := planInput(args.Note, args.Items)
+		id, err := st.RevisePlan(args.ID, in)
+		if err != nil {
+			return nil, planReviseOut{}, err
+		}
+		out := planReviseOut{ID: id, Supersedes: args.ID, Status: "draft", Items: len(in.Items), Next: "a person reviews it with `acline plan show " + fmt.Sprint(id) + "` and approves or rejects it"}
+		return textResult(fmt.Sprintf("plan #%d supersedes #%d (%d items); it is a draft until a person approves it", id, args.ID, len(in.Items))), out, nil
+	})
+}
+
+func addPlanListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_plan_list",
 		Description: "List plans, newest first, optionally for one spec and/or status. Read-only.",
@@ -206,7 +255,9 @@ func registerPlanTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d plan(s)", len(plans))), out, nil
 	})
+}
 
+func addPlanShowTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_plan_show",
 		Description: "Show a plan: its items, dependencies, criteria, and how many tasks approving it would create. Read-only.",
@@ -232,7 +283,9 @@ func registerPlanTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("plan #%d [%s]: %d item(s)", p.ID, p.Status, len(items))), out, nil
 	})
+}
 
+func addPlanApproveTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_plan_approve",
 		Description: "Approve a DRAFT plan: create its tasks, criteria, dependency links, parents and milestones in one transaction. A person's decision: " +
@@ -251,7 +304,9 @@ func registerPlanTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("plan #%d approved: %d task(s) created", args.ID, len(created))), out, nil
 	})
+}
 
+func addPlanEditItemTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_plan_edit_item",
 		Description: "Change or drop one item of a DRAFT plan before it is approved. A person's decision, gated exactly like acline_plan_approve " +
@@ -268,7 +323,9 @@ func registerPlanTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("plan #%d item %s updated", args.ID, args.Ref)), planItemEditOut{ID: args.ID, Ref: args.Ref}, nil
 	})
+}
 
+func addPlanRejectTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_plan_reject",
 		Description: "Reject a DRAFT plan. Needs no token (rejecting is the safe direction) but is refused for an agent actor. The note is kept for acline reflect.",

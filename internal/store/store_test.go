@@ -188,7 +188,8 @@ func TestEventsAreAppendOnly(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 || events[0].Message != "original" {
+	// events[0] is the newest; the task's task_created event comes before it.
+	if len(events) != 2 || events[0].Message != "original" {
 		t.Errorf("event log was altered: %+v", events)
 	}
 }
@@ -218,8 +219,8 @@ func TestEventsCarryActorAttribution(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if len(events) != 1 {
-		t.Fatalf("expected 1 event, got %d", len(events))
+	if len(events) != 2 || events[1].Type != "task_created" { // newest first
+		t.Fatalf("expected the note and the task_created event, got %+v", events)
 	}
 	e := events[0]
 	if e.ActorType.String != "agent" || e.ActorID.String != "test-agent" || e.Model.String != "claude-sonnet-5" {
@@ -686,7 +687,7 @@ func TestSnapshotRoundTrip(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if counts["tasks"] != 1 || counts["specs"] != 1 || counts["events"] != 6 || // the hash_version marker, the logged event, the spec approval, the seal watermark, and a row_seal each for the approval and the check
+	if counts["tasks"] != 1 || counts["specs"] != 1 || counts["events"] != 10 || // the hash_version marker, task_created, spec_recorded, the logged event, the spec approval, the seal watermark, and for the approval and the check each a row_seal and its event
 		counts["checks"] != 1 || counts["approvals"] != 1 {
 		t.Errorf("unexpected import counts: %+v", counts)
 	}

@@ -57,16 +57,21 @@ func (s *Store) AddMilestone(name string, opts MilestoneOpts) (int64, error) {
 		return 0, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(
-		`INSERT INTO milestones (name, description, status, target_date, project_id, actor_type, actor_id, model, created_at, updated_at)
-		 VALUES (?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?)`,
-		name, nullStr(opts.Description), nullStr(opts.TargetDate), nullInt(opts.ProjectID),
-		s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now,
-	)
-	if err != nil {
-		return 0, err
-	}
-	return res.LastInsertId()
+	var id int64
+	err := s.writeWithEvent(nil, "milestone_recorded", func(tx *sql.Tx) (string, error) {
+		res, err := tx.Exec(
+			`INSERT INTO milestones (name, description, status, target_date, project_id, actor_type, actor_id, model, created_at, updated_at)
+			 VALUES (?, ?, 'planned', ?, ?, ?, ?, ?, ?, ?)`,
+			name, nullStr(opts.Description), nullStr(opts.TargetDate), nullInt(opts.ProjectID),
+			s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now,
+		)
+		if err != nil {
+			return "", err
+		}
+		id, err = res.LastInsertId()
+		return fmt.Sprintf("milestone #%d created: %s", id, name), err
+	})
+	return id, err
 }
 
 const milestoneColumns = `id, name, description, status, target_date, project_id, actor_type, actor_id, model, created_at, updated_at`
@@ -127,11 +132,8 @@ func (s *Store) SetMilestoneStatus(id int64, status string) error {
 		return fmt.Errorf("invalid milestone status %q", status)
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(`UPDATE milestones SET status = ?, updated_at = ? WHERE id = ?`, status, now, id)
-	if err != nil {
-		return err
-	}
-	return mustExist(res, "milestone", id)
+	return s.changeWithEvent("milestone", id, "milestone_status_change", fmt.Sprintf("milestone #%d -> %s", id, status),
+		`UPDATE milestones SET status = ?, updated_at = ? WHERE id = ?`, status, now, id)
 }
 
 func (s *Store) SetMilestoneTarget(id int64, targetDate string) error {
@@ -139,21 +141,66 @@ func (s *Store) SetMilestoneTarget(id int64, targetDate string) error {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(`UPDATE milestones SET target_date = ?, updated_at = ? WHERE id = ?`, nullStr(targetDate), now, id)
+	target := targetDate
+	if target == "" {
+		target = "none"
+	}
+	return s.changeWithEvent("milestone", id, "milestone_target_change", fmt.Sprintf("milestone #%d target -> %s", id, target),
+		`UPDATE milestones SET target_date = ?, updated_at = ? WHERE id = ?`, nullStr(targetDate), now, id)
+}
+
+// UpdateMilestone sets a milestone's status and/or target date ("" leaves
+// either as it is) with each change's event, in one transaction: an invalid
+// target no longer leaves the status changed.
+func (s *Store) UpdateMilestone(id int64, status, targetDate string) error {
+	if status != "" && !ValidMilestoneStatuses[status] {
+		return fmt.Errorf("invalid milestone status %q", status)
+	}
+	if err := validTargetDate(targetDate); err != nil {
+		return err
+	}
+	sessionID := s.currentSessionID()
+	tx, err := s.DB.Begin()
 	if err != nil {
 		return err
 	}
-	return mustExist(res, "milestone", id)
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	apply := func(eventType, msg, query string, args ...any) error {
+		res, err := tx.Exec(query, args...)
+		if err != nil {
+			return err
+		}
+		if err := mustExist(res, "milestone", id); err != nil {
+			return err
+		}
+		_, err = s.logEventTx(tx, nil, sessionID, nil, eventType, msg)
+		return err
+	}
+	if status != "" {
+		if err := apply("milestone_status_change", fmt.Sprintf("milestone #%d -> %s", id, status),
+			`UPDATE milestones SET status = ?, updated_at = ? WHERE id = ?`, status, now, id); err != nil {
+			return err
+		}
+	}
+	if targetDate != "" {
+		if err := apply("milestone_target_change", fmt.Sprintf("milestone #%d target -> %s", id, targetDate),
+			`UPDATE milestones SET target_date = ?, updated_at = ? WHERE id = ?`, targetDate, now, id); err != nil {
+			return err
+		}
+	}
+	return tx.Commit()
 }
 
 // SetTaskMilestone assigns (or, with milestoneID nil, clears) the milestone a task belongs to.
 func (s *Store) SetTaskMilestone(taskID int64, milestoneID *int64) error {
 	now := time.Now().UTC().Format(time.RFC3339)
-	res, err := s.DB.Exec(`UPDATE tasks SET milestone_id = ?, updated_at = ? WHERE id = ?`, nullInt(milestoneID), now, taskID)
-	if err != nil {
-		return err
+	msg := "milestone cleared"
+	if milestoneID != nil {
+		msg = fmt.Sprintf("milestone -> #%d", *milestoneID)
 	}
-	return mustExist(res, "task", taskID)
+	return s.changeTaskWithEvent("task", taskID, &taskID, "milestone_change", msg,
+		`UPDATE tasks SET milestone_id = ?, updated_at = ? WHERE id = ?`, nullInt(milestoneID), now, taskID)
 }
 
 func (s *Store) MilestoneTasks(milestoneID int64) ([]Task, error) {

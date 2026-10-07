@@ -20,8 +20,19 @@
       "Bash(sqlite3 *)",
       "Edit(.claude/settings.json)",
       "Edit(.claude/settings.local.json)",
+      "Edit(.claude/skills/**)",
+      "Write(.claude/skills/**)",
+      "Edit(.claude/agents/**)",
+      "Write(.claude/agents/**)",
+      "Edit(.claude/commands/**)",
+      "Write(.claude/commands/**)",
+      "Edit(.mcp.json)",
+      "Write(.mcp.json)",
+      "Edit(.git/hooks/**)",
+      "Write(.git/hooks/**)",
       "Read(~/.acline/**)",
-      "Edit(~/.acline/**)"
+      "Edit(~/.acline/**)",
+      "Write(~/.acline/**)"
     ]
   },
   "env": {

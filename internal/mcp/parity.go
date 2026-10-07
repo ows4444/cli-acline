@@ -2,11 +2,13 @@ package mcp
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -68,41 +70,37 @@ type decisionShowArgs struct {
 }
 
 func registerParityTools(s *sdkmcp.Server, st *store.Store) {
+	addTaskUpdateTool(s, st)
+	addCheckRunnerListTool(s, st)
+	addSpecShowTool(s, st)
+	addDecisionShowTool(s, st)
+}
+
+func addTaskUpdateTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name: "acline_task_update",
 		Description: "Change a task's risk, autonomy, priority, area or type (only the fields given). Raising risk and tightening " +
 			"autonomy are always allowed; lowering risk or loosening autonomy needs a person (or the approval token). " +
-			"Every change is recorded. Fields apply in the order risk, autonomy, priority, area, type, and a refused one stops the update there.",
+			"Every change is recorded. The update is all or nothing: a refused field leaves the task unchanged.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args taskUpdateArgs) (*sdkmcp.CallToolResult, taskUpdateOut, error) {
-		if _, err := st.GetTask(args.ID); err != nil {
+		changed, err := app.UpdateTask(st, args.ID, store.TaskUpdate{
+			Risk: args.Risk, Autonomy: args.Autonomy, Priority: args.Priority, Area: args.Area, Type: args.Type, Token: args.Token,
+		})
+		if errors.Is(err, app.ErrNothingToUpdate) {
+			return nil, taskUpdateOut{}, fmt.Errorf("nothing to update: give at least one of risk, autonomy, priority, area, type")
+		}
+		if err != nil {
 			return nil, taskUpdateOut{}, err
 		}
-		steps := []struct {
-			name, value string
-			apply       func() error
-		}{
-			{"risk", args.Risk, func() error { return st.UpdateTaskRiskWithToken(args.ID, args.Risk, args.Token) }},
-			{"autonomy", args.Autonomy, func() error { return st.UpdateTaskAutonomyWithToken(args.ID, args.Autonomy, args.Token) }},
-			{"priority", args.Priority, func() error { return st.UpdateTaskPriority(args.ID, args.Priority) }},
-			{"area", args.Area, func() error { return st.UpdateTaskArea(args.ID, args.Area) }},
-			{"type", args.Type, func() error { return st.UpdateTaskType(args.ID, args.Type) }},
-		}
-		out := taskUpdateOut{ID: args.ID, Changed: []string{}}
-		for _, step := range steps {
-			if step.value == "" {
-				continue
-			}
-			if err := step.apply(); err != nil {
-				return nil, taskUpdateOut{}, err
-			}
-			out.Changed = append(out.Changed, step.name+"="+step.value)
-		}
-		if len(out.Changed) == 0 {
-			return nil, taskUpdateOut{}, fmt.Errorf("nothing to update: give at least one of risk, autonomy, priority, area, type")
+		out := taskUpdateOut{ID: args.ID, Changed: append([]string{}, changed...)}
+		if len(changed) == 0 {
+			return textResult(fmt.Sprintf("task #%d: already as given", args.ID)), out, nil
 		}
 		return textResult(fmt.Sprintf("task #%d: %s", args.ID, strings.Join(out.Changed, ", "))), out, nil
 	})
+}
 
+func addCheckRunnerListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_check_runner_list",
 		Description: "List the check runners a person configured for a project (the commands acline_check_run executes). Kinds with none use the defaults (Go projects only).",
@@ -124,7 +122,9 @@ func registerParityTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d runner(s) configured for %s", len(list), args.Project)), out, nil
 	})
+}
 
+func addSpecShowTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_spec_show",
 		Description: "Show one spec, with what it said before each revision (oldest first). Revising an approved spec withdraws its approval, so the versions show what was approved.",
@@ -143,7 +143,9 @@ func registerParityTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("spec #%d v%d (%s), %d earlier version(s)", sp.ID, sp.Version, sp.Status, len(versions))), out, nil
 	})
+}
 
+func addDecisionShowTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_decision_show",
 		Description: "Show one ADR-style decision by id.",

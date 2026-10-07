@@ -47,12 +47,12 @@ func TestMemoryTouchAndForget(t *testing.T) {
 	cs, st := connectedTestServer(t)
 	addOut := callTool[memoryAddOut](t, cs, "acline_memory_add", memoryAddArgs{Body: "a lesson"})
 
-	touchOut := callTool[memoryIDOut](t, cs, "acline_memory_touch", memoryIDArgs{ID: addOut.ID})
+	touchOut := callTool[memoryIDOut](t, cs, "acline_memory_touch", memoryRetireArgs{ID: addOut.ID})
 	if touchOut.ID != addOut.ID {
 		t.Fatalf("expected touch to echo back id %d, got %d", addOut.ID, touchOut.ID)
 	}
 
-	forgetOut := callTool[memoryIDOut](t, cs, "acline_memory_forget", memoryIDArgs{ID: addOut.ID})
+	forgetOut := callTool[memoryIDOut](t, cs, "acline_memory_forget", memoryRetireArgs{ID: addOut.ID})
 	if forgetOut.ID != addOut.ID {
 		t.Fatalf("expected forget to echo back id %d, got %d", addOut.ID, forgetOut.ID)
 	}
@@ -128,7 +128,7 @@ func TestDecisionAcceptRejectSupersede(t *testing.T) {
 
 	// A third decision, rejected.
 	thirdOut := callTool[decisionAddOut](t, cs, "acline_decision_add", decisionAddArgs{Title: "use sqlite"})
-	rejectOut := callTool[idOut](t, cs, "acline_decision_reject", idArgs(thirdOut))
+	rejectOut := callTool[idOut](t, cs, "acline_decision_reject", idArgs{ID: thirdOut.ID})
 	if rejectOut.ID != thirdOut.ID {
 		t.Fatalf("expected reject to echo id %d, got %d", thirdOut.ID, rejectOut.ID)
 	}

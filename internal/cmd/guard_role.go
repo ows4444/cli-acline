@@ -1,21 +1,23 @@
 package cmd
 
 import (
+	"acline/internal/store"
 	"fmt"
 	"path/filepath"
 	"regexp"
 	"strings"
 
-	"acline/internal/scaffold"
+	"acline/internal/roles"
 )
 
 // guard_role.go holds a session running as a read-only role to its contract.
 //
 // The security, qa, architect and designer agent stubs list no Edit/Write, and
 // their role files say so, but that list only reaches Claude Code's agent picker:
-// nothing stopped the session from writing through Bash or the file tools. The
-// role's tools are read from the same embedded stub (scaffold.AgentTools), so the
-// contract and the enforcement cannot drift apart.
+// nothing stopped the session from writing through Bash or the file tools. Which
+// roles are read-only is roles.ReadOnly, the rule the store also enforces; a
+// scaffold test holds the stubs to it, so the contract and the enforcement cannot
+// drift apart.
 //
 // This is best-effort, like the rest of the guard: an interpreter running a
 // script file, or a program that writes as a side effect, is not caught. It
@@ -142,33 +144,53 @@ var roleRedirectRe = regexp.MustCompile(`(?:^|[\s\d&])>{1,2}\s*([^\s;&|<>()]+)`)
 // checkRoleScope denies a write when the active role's contract grants no
 // Edit/Write. A session with no role, a role acline ships no stub for, or an
 // unknown role name is not restricted here.
-func checkRoleScope(tool string, input map[string]any) (bool, string) {
-	if st == nil {
+func checkRoleScope(s *store.Store, tool string, input map[string]any) (bool, string) {
+	if s == nil {
 		return false, ""
 	}
-	roleID, err := st.ResolveRole("", nil)
+	roleID, err := s.ResolveRole("", nil)
 	if err != nil || roleID == nil {
 		return false, ""
 	}
-	role, err := st.GetRole(*roleID)
+	role, err := s.GetRole(*roleID)
 	if err != nil {
 		return false, ""
 	}
-	if !scaffold.RoleIsReadOnly(role.Name) {
+	return readOnlyRoleScope(role.Name, tool, input)
+}
+
+// checkSubagentScope holds a subagent to its role's contract. Claude Code names
+// the running subagent in the hook input (agent_type); the read-only agents acline
+// scaffolds (qa, security, architect, designer) are named after their roles, so
+// a tool call from one is judged as that role even when no session runs as it.
+// Without this the role was enforced only for `session start --role` or
+// ACLINE_ROLE, and an agent picked from Claude Code's menu could write through Bash.
+func checkSubagentScope(agentType, tool string, input map[string]any) (bool, string) {
+	if agentType == "" {
+		return false, ""
+	}
+	return readOnlyRoleScope(agentType, tool, input)
+}
+
+// readOnlyRoleScope applies a read-only role's rules to one tool call: no file
+// tool writes, no shell writes, and no ending or restarting the session that
+// carries the role. A role that may edit is not restricted.
+func readOnlyRoleScope(roleName, tool string, input map[string]any) (bool, string) {
+	if !roles.ReadOnly(roleName) {
 		return false, ""
 	}
 	switch {
 	case writeTools[tool]:
-		return true, fmt.Sprintf("blocked: role %s is read-only (its contract grants no Edit/Write), so %s is not available to it", role.Name, tool)
+		return true, fmt.Sprintf("blocked: role %s is read-only (its contract grants no Edit/Write), so %s is not available to it", roleName, tool)
 	case tool == "Bash":
 		cmd, _ := input["command"].(string)
 		for _, target := range bashScanTargets(cmd, 0) {
 			if roleSessionSwitchRe.MatchString(target.text) {
-				return true, fmt.Sprintf("blocked: role %s is read-only, and ending or restarting the session would drop that role — ask the person to end it", role.Name)
+				return true, fmt.Sprintf("blocked: role %s is read-only, and ending or restarting the session would drop that role — ask the person to end it", roleName)
 			}
 		}
 		if why := bashWritesFiles(cmd); why != "" {
-			return true, fmt.Sprintf("blocked: role %s is read-only (its contract grants no Edit/Write), and this command %s — hand the change to a role that may edit", role.Name, why)
+			return true, fmt.Sprintf("blocked: role %s is read-only (its contract grants no Edit/Write), and this command %s — hand the change to a role that may edit", roleName, why)
 		}
 	}
 	return false, ""

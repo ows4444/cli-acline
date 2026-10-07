@@ -19,7 +19,8 @@ type Project struct {
 	ID              int64
 	Name            string
 	Path            sql.NullString
-	AutonomyDefault string
+	AutonomyDefault string // hitl or hotl: what a task added without its own autonomy gets
+	RiskDefault     string // what a task added without its own risk gets
 	CreatedAt       string
 }
 
@@ -39,20 +40,43 @@ func (s *Store) AddProject(name, path, autonomy string) (int64, error) {
 	return s.AddProjectWithToken(name, path, autonomy, "")
 }
 
-// AddProjectWithToken registers a project. A project with a path needs a person
+// ErrProjectDefaultAuto is returned for a project whose default autonomy would
+// be "auto": auto is earned task by task from a measured eval (PromoteAutonomy),
+// and a project default would hand it to every new task without one.
+var ErrProjectDefaultAuto = errors.New("a project cannot default new tasks to autonomy \"auto\": it is earned per task from a measured eval (`acline task promote`)")
+
+// AddProjectWithToken registers a project with the default risk (low). See
+// AddProjectWithDefaults.
+func (s *Store) AddProjectWithToken(name, path, autonomy, token string) (int64, error) {
+	return s.AddProjectWithDefaults(name, path, autonomy, "", token)
+}
+
+// AddProjectWithDefaults registers a project. A project with a path needs a person
 // (or the approval token, when one is enabled), since the path becomes part of
 // the guard's write scope; a path-less project widens nothing and is open to
 // everyone. Either way the path must not be the root or contain the home
 // directory, and the registration is recorded as a project_added event.
-func (s *Store) AddProjectWithToken(name, path, autonomy, token string) (int64, error) {
+//
+// autonomy (hitl|hotl, default hotl) and risk (default low) are what a task added
+// to the project without its own autonomy or risk gets.
+func (s *Store) AddProjectWithDefaults(name, path, autonomy, risk, token string) (int64, error) {
 	if name == "" {
 		return 0, fmt.Errorf("project name is required")
 	}
 	if autonomy == "" {
 		autonomy = "hotl"
 	}
+	if autonomy == "auto" {
+		return 0, ErrProjectDefaultAuto
+	}
 	if !ValidAutonomy[autonomy] {
 		return 0, fmt.Errorf("invalid autonomy %q", autonomy)
+	}
+	if risk == "" {
+		risk = "low"
+	}
+	if !ValidRisks[risk] {
+		return 0, fmt.Errorf("invalid default risk %q", risk)
 	}
 	if path != "" {
 		abs, err := filepath.Abs(path)
@@ -75,8 +99,8 @@ func (s *Store) AddProjectWithToken(name, path, autonomy, token string) (int64, 
 	}
 	defer tx.Rollback()
 	res, err := tx.Exec(
-		`INSERT INTO projects (name, path, autonomy_default, created_at) VALUES (?, ?, ?, ?)`,
-		name, nullStr(path), autonomy, now,
+		`INSERT INTO projects (name, path, autonomy_default, risk_default, created_at) VALUES (?, ?, ?, ?, ?)`,
+		name, nullStr(path), autonomy, risk, now,
 	)
 	if err != nil {
 		return 0, err
@@ -110,7 +134,7 @@ func ProjectPathTooBroad(path string) bool {
 }
 
 func (s *Store) ListProjects() ([]Project, error) {
-	rows, err := s.DB.Query(`SELECT id, name, path, autonomy_default, created_at FROM projects ORDER BY id`)
+	rows, err := s.DB.Query(`SELECT id, name, path, autonomy_default, risk_default, created_at FROM projects ORDER BY id`)
 	if err != nil {
 		return nil, err
 	}
@@ -118,7 +142,7 @@ func (s *Store) ListProjects() ([]Project, error) {
 	var out []Project
 	for rows.Next() {
 		var p Project
-		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.AutonomyDefault, &p.CreatedAt); err != nil {
+		if err := rows.Scan(&p.ID, &p.Name, &p.Path, &p.AutonomyDefault, &p.RiskDefault, &p.CreatedAt); err != nil {
 			return nil, err
 		}
 		out = append(out, p)
@@ -127,9 +151,9 @@ func (s *Store) ListProjects() ([]Project, error) {
 }
 
 func (s *Store) GetProjectByName(name string) (*Project, error) {
-	row := s.DB.QueryRow(`SELECT id, name, path, autonomy_default, created_at FROM projects WHERE name = ?`, name)
+	row := s.DB.QueryRow(`SELECT id, name, path, autonomy_default, risk_default, created_at FROM projects WHERE name = ?`, name)
 	var p Project
-	if err := row.Scan(&p.ID, &p.Name, &p.Path, &p.AutonomyDefault, &p.CreatedAt); err != nil {
+	if err := row.Scan(&p.ID, &p.Name, &p.Path, &p.AutonomyDefault, &p.RiskDefault, &p.CreatedAt); err != nil {
 		if err == sql.ErrNoRows {
 			return nil, fmt.Errorf("project %q not found: %w", name, ErrProjectNotFound)
 		}

@@ -46,10 +46,32 @@ func TestRouteHighRiskNeedsHumanApproval(t *testing.T) {
 	s := humanStore(t)
 	id, _ := s.AddTask("t", "", "normal", TaskOpts{Risk: "high"})
 	updateTaskStatus(s.DB, id, "in_progress")
-	s.AddCheck(id, "test", "pass", "")
+	s.AddCheckWithMeta(id, nil, "test", "pass", "", "", CheckMeta{Source: CheckSourceRunner})
 	r := routeOf(t, s, id)
-	if r.Action != RouteRequestApproval || !r.NeedsHuman || len(r.Blockers) == 0 {
+	if r.Action != RouteRequestApproval || !r.NeedsHuman || len(r.Blockers) != 1 {
 		t.Fatalf("route = %+v", r)
+	}
+}
+
+// A blocker an agent clears by running a check goes to an agent, not to a
+// person: a hand-typed pass at high risk needs `check run`, then the approval.
+func TestRouteGateBlockerAnAgentCanClearGoesToVerify(t *testing.T) {
+	s := humanStore(t)
+	id, _ := s.AddTask("t", "", "normal", TaskOpts{Risk: "high"})
+	updateTaskStatus(s.DB, id, "in_progress")
+	s.AddCheck(id, "test", "pass", "typed")
+	r := routeOf(t, s, id)
+	if r.Action != RouteVerify || r.NeedsHuman || r.Role == nil || r.Role.Name != "qa" {
+		t.Fatalf("route = %+v", r)
+	}
+	for _, b := range r.Blockers {
+		if strings.Contains(b, "approval") {
+			t.Fatalf("approval listed before the checks are settled: %v", r.Blockers)
+		}
+	}
+	next, err := s.NextTask(nil)
+	if err != nil || next == nil || next.TaskID != id {
+		t.Fatalf("next = %+v, %v; want the task, as an agent can act on it", next, err)
 	}
 }
 
@@ -128,5 +150,17 @@ func TestBlockedReasonIsRecordedShownAndCleared(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("no audit event with the reason: %+v", evs)
+	}
+}
+
+// Every check skipped blocks the gate (a skip is not evidence); the next step is to verify for
+// real, not to ask a person to approve.
+func TestRouteEverythingSkippedGoesBackToVerify(t *testing.T) {
+	s := humanStore(t)
+	id, _ := s.AddTask("t", "", "normal", TaskOpts{})
+	updateTaskStatus(s.DB, id, "in_progress")
+	s.AddCheck(id, "test", "skipped", "go is not installed")
+	if r := routeOf(t, s, id); r.Action != RouteVerify || r.NeedsHuman {
+		t.Fatalf("route = %+v, want verify by an agent", r)
 	}
 }

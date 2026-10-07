@@ -263,7 +263,7 @@ func TestPlanToolsProposeAndRead(t *testing.T) {
 	spec, _ := st.AddSpec("Inventory", "Track stock.")
 	st.ApproveSpec(spec, "")
 
-	// The tool surface: propose and read only.
+	// The tool surface: read, propose and revise drafts, and the token-gated decisions.
 	res, err := cs.ListTools(context.Background(), nil)
 	if err != nil {
 		t.Fatal(err)
@@ -272,7 +272,7 @@ func TestPlanToolsProposeAndRead(t *testing.T) {
 		if strings.HasPrefix(tool.Name, "acline_plan_") {
 			switch tool.Name {
 			case "acline_plan_propose", "acline_plan_list", "acline_plan_show",
-				"acline_plan_approve", "acline_plan_edit_item", "acline_plan_reject":
+				"acline_plan_approve", "acline_plan_edit_item", "acline_plan_reject", "acline_plan_revise":
 			default:
 				t.Errorf("unexpected plan tool %q: a new plan tool must be classified (read-only, propose, or a token-gated decision)", tool.Name)
 			}

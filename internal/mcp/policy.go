@@ -67,6 +67,10 @@ type policyShowOut struct {
 // it's meant to be called by a harness's pre-tool-use hook and asserted on its
 // exit code, not something an editor view would invoke.
 func registerPolicyTools(s *sdkmcp.Server, st *store.Store) {
+	addPolicyShowTool(s, st)
+}
+
+func addPolicyShowTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_policy_show",
 		Description: "Show the active session's parsed policy (allow/deny tools and paths). Same view `acline policy show` prints.",

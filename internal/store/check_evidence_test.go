@@ -131,25 +131,39 @@ func TestStaleRunnerPassBlocksHighRiskWhenTheTreeChanged(t *testing.T) {
 	}
 }
 
-func TestLowerRiskOnlyWarnsAboutHandRecordedAndStaleEvidence(t *testing.T) {
+func TestLowerRiskOnlyWarnsAboutStaleEvidence(t *testing.T) {
 	h := humanStore(t)
 	id, _ := h.AddTask("t", "", "normal", TaskOpts{Risk: "medium"})
-	a := asAgent(h)
-	if _, err := a.AddCheck(id, "test", "pass", "typed by an agent"); err != nil {
+	if _, err := h.AddCheck(id, "test", "pass", "a person ran it"); err != nil {
 		t.Fatal(err)
 	}
-	g, _ := h.EvaluateGate(id)
-	if !g.OK() {
-		t.Fatalf("medium risk must stay unblocked (this is a warning): %+v", g)
+	if g, _ := h.EvaluateGate(id); !g.OK() {
+		t.Fatalf("a person's typed pass at medium risk was blocked: %+v", g)
 	}
-	if !strings.Contains(strings.Join(g.Warnings, "\n"), "by hand") {
-		t.Errorf("no warning about a hand-recorded pass: %v", g.Warnings)
-	}
-
 	runnerCheck(t, h, id, "lint", "pass", treeA)
-	g, _ = h.EvaluateGateForTree(id, treeB)
+	g, _ := h.EvaluateGateForTree(id, treeB)
 	if !g.OK() || !strings.Contains(strings.Join(g.Warnings, "\n"), "changed since") {
 		t.Errorf("stale evidence should warn, not block, below high risk: %+v", g)
+	}
+}
+
+// The agent whose work is being judged cannot vouch for it: its own typed pass
+// of a kind acline can run never counts, at any risk. It runs the check instead.
+func TestAnAgentsTypedPassNeverCounts(t *testing.T) {
+	for _, risk := range []string{"low", "medium"} {
+		h := humanStore(t)
+		id, _ := h.AddTask("t", "", "normal", TaskOpts{Risk: risk})
+		if _, err := asAgent(h).AddCheck(id, "test", "pass", "trust me"); err != nil {
+			t.Fatal(err)
+		}
+		g, _ := h.EvaluateGateForTree(id, treeA)
+		if g.OK() || !strings.Contains(strings.Join(g.Blockers, "\n"), "by hand") {
+			t.Fatalf("risk=%s: an agent's typed pass completed the task: %+v", risk, g)
+		}
+		runnerCheck(t, asAgent(h), id, "test", "pass", treeA)
+		if g, _ := h.EvaluateGateForTree(id, treeA); !g.OK() {
+			t.Errorf("risk=%s: a pass acline ran did not clear it: %+v", risk, g)
+		}
 	}
 }
 
@@ -284,5 +298,91 @@ func TestHighRiskRunnerPassWithNoTreeIsNotEvidenceForAKnownTree(t *testing.T) {
 	}
 	if g, _ := h.EvaluateGate(id); !g.OK() {
 		t.Fatalf("a caller that does not know the tree cannot prove anything stale: %+v", g)
+	}
+}
+
+// A high-risk task whose only results are skipped had nothing verified, yet the
+// "needs a passing check acline ran" rule only fired when some check had passed,
+// so an approval alone completed it.
+func TestHighRiskWithOnlySkippedChecksIsBlocked(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		add  func(s *Store, task int64)
+	}{
+		{"runner skipped", func(s *Store, task int64) { runnerCheck(t, s, task, "test", "skipped", treeA) }},
+		{"typed skipped", func(s *Store, task int64) { s.AddCheck(task, "test", "skipped", "no tool") }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := humanStore(t)
+			id, _ := h.AddTask("t", "", "normal", TaskOpts{Risk: "high"})
+			tc.add(h, id)
+			approve(t, h, id)
+			g, err := h.EvaluateGateForTree(id, treeA)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if g.OK() {
+				t.Fatalf("a high-risk task with nothing verified passed the gate: %+v", g)
+			}
+			if !strings.Contains(strings.Join(g.Blockers, "\n"), "every recorded check was skipped") {
+				t.Errorf("blockers %q do not say nothing was verified", g.Blockers)
+			}
+		})
+	}
+}
+
+// Skipped is never evidence. A task whose every
+// newest result is skipped had nothing verified and blocks at every risk; one
+// real pass beside a skip still counts.
+func TestEveryRiskBlocksWhenEveryCheckWasSkipped(t *testing.T) {
+	for _, risk := range []string{"low", "medium", "high", "critical"} {
+		h := humanStore(t)
+		id, _ := h.AddTask("t", "", "normal", TaskOpts{Risk: risk})
+		runnerCheck(t, h, id, "test", "skipped", treeA)
+		approve(t, h, id)
+		g, err := h.EvaluateGateForTree(id, treeA)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if g.OK() {
+			t.Errorf("risk=%s: a task with only skipped checks passed the gate: %+v", risk, g)
+		}
+		if n := strings.Count(strings.Join(g.Blockers, "\n"), "skipped"); n != 1 {
+			t.Errorf("risk=%s: want exactly one skipped blocker, got %q", risk, g.Blockers)
+		}
+	}
+	h := humanStore(t)
+	id, _ := h.AddTask("t", "", "normal", TaskOpts{Risk: "low"})
+	runnerCheck(t, h, id, "test", "pass", treeA)
+	runnerCheck(t, h, id, "sast", "skipped", treeA)
+	if g, _ := h.EvaluateGateForTree(id, treeA); !g.OK() {
+		t.Errorf("a real pass beside a skip was blocked: %+v", g)
+	}
+}
+
+// "A passing check acline ran" let a lone lint (or sast/sca) pass carry a
+// high-risk task: the tests themselves were never run. High and critical risk
+// need a passing test check acline ran.
+func TestHighRiskNeedsATestRunByAcline(t *testing.T) {
+	for _, risk := range []string{"high", "critical"} {
+		h := humanStore(t)
+		id, _ := h.AddTask("t", "", "normal", TaskOpts{Risk: risk})
+		runnerCheck(t, h, id, "lint", "pass", treeA)
+		approve(t, h, id)
+		g, _ := h.EvaluateGateForTree(id, treeA)
+		if g.OK() || !strings.Contains(strings.Join(g.Blockers, "\n"), "test check") {
+			t.Fatalf("risk=%s: a lint pass alone passed the gate: %+v", risk, g)
+		}
+		runnerCheck(t, h, id, "test", "pass", treeA)
+		if g, _ := h.EvaluateGateForTree(id, treeA); !g.OK() {
+			t.Errorf("risk=%s: lint + test runner passes still blocked: %+v", risk, g)
+		}
+	}
+	// Below high risk a lint pass is still enough.
+	h := humanStore(t)
+	id, _ := h.AddTask("t", "", "normal", TaskOpts{Risk: "medium"})
+	runnerCheck(t, h, id, "lint", "pass", treeA)
+	if g, _ := h.EvaluateGateForTree(id, treeA); !g.OK() {
+		t.Errorf("medium risk with a lint runner pass blocked: %+v", g)
 	}
 }

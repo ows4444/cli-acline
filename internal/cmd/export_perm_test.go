@@ -11,21 +11,19 @@ import (
 // The whole-store snapshot and the audit export were written 0644 while
 // the store itself is 0600.
 func TestSnapshotAndAuditExportsArePrivate(t *testing.T) {
-	withTestStore(t)
+	c := newTestCLI(t)
 	dir := t.TempDir()
 	snap := filepath.Join(dir, "snap.json")
 	if err := os.WriteFile(snap, []byte("old"), 0o644); err != nil { // an existing, wider file
 		t.Fatal(err)
 	}
-	prevSnap, prevOut := snapshotExportPath, exportOut
-	snapshotExportPath, exportOut = snap, filepath.Join(dir, "audit.jsonl")
-	t.Cleanup(func() { snapshotExportPath, exportOut = prevSnap, prevOut })
+	exportOut := filepath.Join(dir, "audit.jsonl")
 
 	captureStdout(t, func() {
-		if err := snapshotExportCmd.RunE(snapshotExportCmd, nil); err != nil {
+		if err := c.run("snapshot", "export", "--out", snap); err != nil {
 			t.Fatal(err)
 		}
-		if err := exportCmd.RunE(exportCmd, nil); err != nil {
+		if err := c.run("export", "--out", exportOut); err != nil {
 			t.Fatal(err)
 		}
 	})

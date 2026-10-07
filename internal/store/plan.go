@@ -358,8 +358,11 @@ func (s *Store) ListProjectPlans(specID *int64, status string, projectID *int64)
 }
 
 // PlanItems returns a plan's items in proposal order, edges and criteria attached.
-func (s *Store) PlanItems(planID int64) ([]PlanItem, error) {
-	rows, err := s.DB.Query(`SELECT id, plan_id, ref, title, description, area, type, risk, autonomy, parent_ref, milestone, size, dropped, position, task_id
+func (s *Store) PlanItems(planID int64) ([]PlanItem, error) { return planItems(s.DB, planID) }
+
+// planItems is PlanItems through q: a transaction reads its own items.
+func planItems(q chainQuerier, planID int64) ([]PlanItem, error) {
+	rows, err := q.Query(`SELECT id, plan_id, ref, title, description, area, type, risk, autonomy, parent_ref, milestone, size, dropped, position, task_id
 		FROM plan_items WHERE plan_id = ? ORDER BY position`, planID)
 	if err != nil {
 		return nil, err
@@ -384,7 +387,7 @@ func (s *Store) PlanItems(planID int64) ([]PlanItem, error) {
 	for i := range items {
 		byRef[items[i].Ref] = &items[i]
 	}
-	erows, err := s.DB.Query(`SELECT item_ref, depends_on_ref FROM plan_edges WHERE plan_id = ? ORDER BY id`, planID)
+	erows, err := q.Query(`SELECT item_ref, depends_on_ref FROM plan_edges WHERE plan_id = ? ORDER BY id`, planID)
 	if err != nil {
 		return nil, err
 	}
@@ -399,7 +402,7 @@ func (s *Store) PlanItems(planID int64) ([]PlanItem, error) {
 		}
 	}
 	erows.Close()
-	crows, err := s.DB.Query(`SELECT c.plan_item_id, c.text FROM plan_criteria c JOIN plan_items i ON i.id = c.plan_item_id WHERE i.plan_id = ? ORDER BY c.id`, planID)
+	crows, err := q.Query(`SELECT c.plan_item_id, c.text FROM plan_criteria c JOIN plan_items i ON i.id = c.plan_item_id WHERE i.plan_id = ? ORDER BY c.id`, planID)
 	if err != nil {
 		return nil, err
 	}
@@ -478,22 +481,24 @@ func (s *Store) ProposePlan(specID int64, in PlanInput) (int64, error) {
 	if err != nil {
 		return 0, err
 	}
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return 0, err
+	}
+	defer tx.Rollback()
+	// One draft per spec, checked under the write lock so two proposals at once
+	// cannot both pass it.
 	var draft int64
-	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM plans WHERE spec_id = ? AND status = 'draft'`, specID).Scan(&draft); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(id), 0) FROM plans WHERE spec_id = ? AND status = 'draft'`, specID).Scan(&draft); err != nil {
 		return 0, err
 	}
 	if draft != 0 {
 		return 0, fmt.Errorf("%w (#%d): approve, reject or revise it first", ErrPlanDraftExists, draft)
 	}
 	var version int
-	if err := s.DB.QueryRow(`SELECT COALESCE(MAX(version), 0) + 1 FROM plans WHERE spec_id = ?`, specID).Scan(&version); err != nil {
+	if err := tx.QueryRow(`SELECT COALESCE(MAX(version), 0) + 1 FROM plans WHERE spec_id = ?`, specID).Scan(&version); err != nil {
 		return 0, err
 	}
-	tx, err := s.DB.Begin()
-	if err != nil {
-		return 0, err
-	}
-	defer tx.Rollback()
 	id, err := s.insertPlan(tx, spec, version, &in)
 	if err != nil {
 		return 0, err
@@ -526,6 +531,9 @@ func (s *Store) RevisePlan(planID int64, in PlanInput) (int64, error) {
 		return 0, err
 	}
 	defer tx.Rollback()
+	if err := checkTransition(tx, "plan", planID, "superseded"); err != nil {
+		return 0, err
+	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	if _, err := tx.Exec(`UPDATE plans SET status = 'superseded', decided_at = ? WHERE id = ?`, now, planID); err != nil {
 		return 0, err
@@ -549,6 +557,24 @@ func (s *Store) draftPlan(planID int64) (*Plan, error) {
 		return nil, fmt.Errorf("plan #%d is %s: only a draft can be changed", planID, p.Status)
 	}
 	return p, nil
+}
+
+// requireDraftTx re-reads the plan's status inside tx. The check made before
+// the transaction can be stale by the time tx holds the write lock: another
+// process may have approved, rejected or revised the plan in between.
+func requireDraftTx(tx *sql.Tx, planID int64) error {
+	var status string
+	err := tx.QueryRow(`SELECT status FROM plans WHERE id = ?`, planID).Scan(&status)
+	if errors.Is(err, sql.ErrNoRows) {
+		return fmt.Errorf("plan #%d: %w", planID, ErrNotFound)
+	}
+	if err != nil {
+		return err
+	}
+	if status != "draft" {
+		return fmt.Errorf("plan #%d is %s: only a draft can be changed", planID, status)
+	}
+	return nil
 }
 
 // PlanItemEdit changes a draft item. A nil field is left alone; Drop removes
@@ -615,15 +641,26 @@ func (s *Store) EditPlanItem(planID int64, ref string, e PlanItemEdit, token str
 	if len(set) == 0 {
 		return errors.New("nothing to change")
 	}
-	res, err := s.DB.Exec(`UPDATE plan_items SET `+strings.Join(set, ", ")+` WHERE plan_id = ? AND ref = ?`, append(args, planID, ref)...)
+	sessionID := s.currentSessionID()
+	tx, err := s.DB.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	if err := requireDraftTx(tx, planID); err != nil {
+		return err
+	}
+	res, err := tx.Exec(`UPDATE plan_items SET `+strings.Join(set, ", ")+` WHERE plan_id = ? AND ref = ?`, append(args, planID, ref)...)
 	if err != nil {
 		return err
 	}
 	if err := mustExist(res, "plan item "+ref+" of plan", planID); err != nil {
 		return err
 	}
-	s.LogEventGlobal("plan_edited", fmt.Sprintf("plan #%d item %s edited", planID, ref))
-	return nil
+	if _, err := s.logEventTx(tx, nil, sessionID, nil, "plan_edited", fmt.Sprintf("plan #%d item %s edited", planID, ref)); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // CreatedTask pairs a plan item with the task approval created for it.
@@ -654,107 +691,25 @@ func (s *Store) ApprovePlan(planID int64, token string) ([]CreatedTask, error) {
 	if spec.Version != plan.SpecVersion {
 		return nil, ErrPlanStale
 	}
-	all, err := s.PlanItems(planID)
-	if err != nil {
-		return nil, err
-	}
-	var items []PlanItem
-	kept := map[string]bool{}
-	for _, it := range all {
-		if !it.Dropped {
-			items = append(items, it)
-			kept[it.Ref] = true
-		}
-	}
-	if len(items) == 0 {
-		return nil, errors.New("every item was dropped: nothing to approve (reject the plan instead)")
-	}
-
+	sessionID := s.currentSessionID()
 	tx, err := s.DB.Begin()
 	if err != nil {
 		return nil, err
 	}
 	defer tx.Rollback()
 
-	milestones := map[string]int64{}
-	milestoneID := func(name string) (*int64, error) {
-		if name == "" {
-			return nil, nil
-		}
-		if id, ok := milestones[name]; ok {
-			return &id, nil
-		}
-		var id int64
-		err := tx.QueryRow(`SELECT id FROM milestones WHERE name = ? AND project_id IS ?`, name, nullInt64Arg(plan.ProjectID)).Scan(&id)
-		if errors.Is(err, sql.ErrNoRows) {
-			now := time.Now().UTC().Format(time.RFC3339)
-			res, ierr := tx.Exec(`INSERT INTO milestones (name, status, project_id, actor_type, actor_id, model, created_at, updated_at)
-				VALUES (?, 'planned', ?, ?, ?, ?, ?, ?)`, name, plan.ProjectID, s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now)
-			if ierr != nil {
-				return nil, ierr
-			}
-			id, err = res.LastInsertId()
-		}
-		if err != nil {
-			return nil, err
-		}
-		milestones[name] = id
-		return &id, nil
+	items, err := approvablePlanItems(tx, plan)
+	if err != nil {
+		return nil, err
 	}
-
-	taskOf := map[string]int64{}
-	var created []CreatedTask
-	specID := spec.ID
-	var projectID *int64
-	if plan.ProjectID.Valid {
-		projectID = &plan.ProjectID.Int64
-	}
-	for _, it := range items {
-		mid, err := milestoneID(it.Milestone.String)
-		if err != nil {
-			return nil, err
-		}
-		tid, err := s.insertTask(tx, it.Title, it.Description, "normal", TaskOpts{
-			Area: it.Area.String, Type: it.Type.String, Risk: it.Risk, Autonomy: it.Autonomy,
-			SpecID: &specID, ProjectID: projectID, MilestoneID: mid,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("creating %s: %w", it.Ref, err)
-		}
-		taskOf[it.Ref] = tid
-		created = append(created, CreatedTask{Ref: it.Ref, TaskID: tid})
-		if _, err := tx.Exec(`UPDATE tasks SET plan_item_id = ? WHERE id = ?`, it.ID, tid); err != nil {
-			return nil, err
-		}
-		if _, err := tx.Exec(`UPDATE plan_items SET task_id = ? WHERE id = ?`, tid, it.ID); err != nil {
-			return nil, err
-		}
-		now := time.Now().UTC().Format(time.RFC3339)
-		for _, c := range it.Criteria {
-			if _, err := tx.Exec(`INSERT INTO task_criteria (task_id, text, pattern, created_at) VALUES (?, ?, ?, ?)`,
-				tid, c, nullStr(DetectEARSPattern(c)), now); err != nil {
-				return nil, err
-			}
-		}
+	taskOf, created, err := s.createPlanTasks(tx, sessionID, plan, spec.ID, items)
+	if err != nil {
+		return nil, err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	var links int
-	for _, it := range items {
-		if it.Parent.Valid && kept[it.Parent.String] {
-			if _, err := tx.Exec(`UPDATE tasks SET parent_id = ? WHERE id = ?`, taskOf[it.Parent.String], taskOf[it.Ref]); err != nil {
-				return nil, err
-			}
-		}
-		for _, d := range it.DependsOn {
-			if !kept[d] {
-				continue
-			}
-			if _, err := tx.Exec(`INSERT INTO task_links (task_id, related_task_id, relation, created_at) VALUES (?, ?, 'depends_on', ?)`,
-				taskOf[it.Ref], taskOf[d], now); err != nil {
-				return nil, err
-			}
-			links++
-		}
+	links, err := linkPlanTasks(tx, items, taskOf, now)
+	if err != nil {
+		return nil, err
 	}
 	if _, err := tx.Exec(`UPDATE plans SET status = 'approved', decided_at = ? WHERE id = ?`, now, planID); err != nil {
 		return nil, err
@@ -764,6 +719,129 @@ func (s *Store) ApprovePlan(planID int64, token string) ([]CreatedTask, error) {
 		return nil, err
 	}
 	return created, tx.Commit()
+}
+
+// approvablePlanItems re-checks the plan under tx's write lock and returns the
+// items approval creates (the ones not dropped). Two approvals at once must
+// create the tasks once, and an edit or a spec revision that landed after the
+// checks made before the transaction must be what gets approved (or refused).
+func approvablePlanItems(tx *sql.Tx, plan *Plan) ([]PlanItem, error) {
+	if err := checkTransition(tx, "plan", plan.ID, "approved"); err != nil {
+		return nil, err
+	}
+	var specVersion int
+	if err := tx.QueryRow(`SELECT version FROM specs WHERE id = ?`, plan.SpecID).Scan(&specVersion); err != nil {
+		return nil, err
+	}
+	if specVersion != plan.SpecVersion {
+		return nil, ErrPlanStale
+	}
+	all, err := planItems(tx, plan.ID)
+	if err != nil {
+		return nil, err
+	}
+	var items []PlanItem
+	for _, it := range all {
+		if !it.Dropped {
+			items = append(items, it)
+		}
+	}
+	if len(items) == 0 {
+		return nil, errors.New("every item was dropped: nothing to approve (reject the plan instead)")
+	}
+	return items, nil
+}
+
+// createPlanTasks creates one task per item, with its criteria and milestone,
+// and returns each item's task by ref.
+func (s *Store) createPlanTasks(tx *sql.Tx, sessionID *int64, plan *Plan, specID int64, items []PlanItem) (map[string]int64, []CreatedTask, error) {
+	milestones := map[string]int64{}
+	taskOf := map[string]int64{}
+	var created []CreatedTask
+	var projectID *int64
+	if plan.ProjectID.Valid {
+		projectID = &plan.ProjectID.Int64
+	}
+	for _, it := range items {
+		mid, err := s.planMilestone(tx, plan, it.Milestone.String, milestones)
+		if err != nil {
+			return nil, nil, err
+		}
+		tid, err := s.insertTask(tx, sessionID, it.Title, it.Description, "normal", TaskOpts{
+			Area: it.Area.String, Type: it.Type.String, Risk: it.Risk, Autonomy: it.Autonomy,
+			SpecID: &specID, ProjectID: projectID, MilestoneID: mid,
+		})
+		if err != nil {
+			return nil, nil, fmt.Errorf("creating %s: %w", it.Ref, err)
+		}
+		taskOf[it.Ref] = tid
+		created = append(created, CreatedTask{Ref: it.Ref, TaskID: tid})
+		if _, err := tx.Exec(`UPDATE tasks SET plan_item_id = ? WHERE id = ?`, it.ID, tid); err != nil {
+			return nil, nil, err
+		}
+		if _, err := tx.Exec(`UPDATE plan_items SET task_id = ? WHERE id = ?`, tid, it.ID); err != nil {
+			return nil, nil, err
+		}
+		now := time.Now().UTC().Format(time.RFC3339)
+		for _, c := range it.Criteria {
+			if _, err := tx.Exec(`INSERT INTO task_criteria (task_id, text, pattern, created_at) VALUES (?, ?, ?, ?)`,
+				tid, c, nullStr(DetectEARSPattern(c)), now); err != nil {
+				return nil, nil, err
+			}
+		}
+	}
+	return taskOf, created, nil
+}
+
+// planMilestone is the id of the plan project's milestone called name, created
+// if it does not exist; nil for no milestone. seen caches the ids found so far.
+func (s *Store) planMilestone(tx *sql.Tx, plan *Plan, name string, seen map[string]int64) (*int64, error) {
+	if name == "" {
+		return nil, nil
+	}
+	if id, ok := seen[name]; ok {
+		return &id, nil
+	}
+	var id int64
+	err := tx.QueryRow(`SELECT id FROM milestones WHERE name = ? AND project_id IS ?`, name, nullInt64Arg(plan.ProjectID)).Scan(&id)
+	if errors.Is(err, sql.ErrNoRows) {
+		now := time.Now().UTC().Format(time.RFC3339)
+		res, ierr := tx.Exec(`INSERT INTO milestones (name, status, project_id, actor_type, actor_id, model, created_at, updated_at)
+			VALUES (?, 'planned', ?, ?, ?, ?, ?, ?)`, name, plan.ProjectID, s.Actor.Type, s.Actor.ID, nullStr(s.Actor.Model), now, now)
+		if ierr != nil {
+			return nil, ierr
+		}
+		id, err = res.LastInsertId()
+	}
+	if err != nil {
+		return nil, err
+	}
+	seen[name] = id
+	return &id, nil
+}
+
+// linkPlanTasks sets each created task's parent and depends_on links, skipping
+// refs to dropped items, and returns how many links it made.
+func linkPlanTasks(tx *sql.Tx, items []PlanItem, taskOf map[string]int64, now string) (int, error) {
+	var links int
+	for _, it := range items {
+		if _, ok := taskOf[it.Parent.String]; it.Parent.Valid && ok {
+			if _, err := tx.Exec(`UPDATE tasks SET parent_id = ? WHERE id = ?`, taskOf[it.Parent.String], taskOf[it.Ref]); err != nil {
+				return 0, err
+			}
+		}
+		for _, d := range it.DependsOn {
+			if _, ok := taskOf[d]; !ok {
+				continue
+			}
+			if _, err := tx.Exec(`INSERT INTO task_links (task_id, related_task_id, relation, created_at) VALUES (?, ?, 'depends_on', ?)`,
+				taskOf[it.Ref], taskOf[d], now); err != nil {
+				return 0, err
+			}
+			links++
+		}
+	}
+	return links, nil
 }
 
 // RejectPlan rejects a draft. Like rejecting memory it is the safe direction and
@@ -778,19 +856,21 @@ func (s *Store) RejectPlan(planID int64, note string) error {
 		return err
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	if _, err := s.DB.Exec(`UPDATE plans SET status = 'rejected', decided_at = ? WHERE id = ?`, now, planID); err != nil {
-		return err
-	}
 	msg := fmt.Sprintf("plan #%d rejected", planID)
 	if note = strings.TrimSpace(note); note != "" {
 		msg += ": " + note
+	}
+	if err := s.transitionWithEvent("plan", planID, "rejected", "plan_rejected", msg,
+		`UPDATE plans SET status = 'rejected', decided_at = ? WHERE id = ?`, now, planID); err != nil {
+		return err
+	}
+	if note != "" {
 		var pid *int64
 		if plan.ProjectID.Valid {
 			pid = &plan.ProjectID.Int64
 		}
 		_, _ = s.AddNote(pid, fmt.Sprintf("plan #%d for spec #%d was rejected: %s", planID, plan.SpecID, note), "conversation")
 	}
-	s.LogEventGlobal("plan_rejected", msg)
 	return nil
 }
 

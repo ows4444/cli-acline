@@ -6,6 +6,7 @@ import (
 
 	sdkmcp "github.com/modelcontextprotocol/go-sdk/mcp"
 
+	"acline/internal/app"
 	"acline/internal/store"
 )
 
@@ -61,11 +62,15 @@ type taskAddArgs struct {
 	Description string `json:"description,omitempty"`
 	Priority    string `json:"priority,omitempty" jsonschema:"low|normal|high|urgent (default normal)"`
 	Area        string `json:"area,omitempty" jsonschema:"ownership area, e.g. cli, store, hooks, skills, docs"`
-	Risk        string `json:"risk,omitempty" jsonschema:"low|medium|high|critical (default low)"`
-	Autonomy    string `json:"autonomy,omitempty" jsonschema:"hitl|hotl|auto (default hotl)"`
+	Risk        string `json:"risk,omitempty" jsonschema:"low|medium|high|critical (default: the project's, else low)"`
+	Autonomy    string `json:"autonomy,omitempty" jsonschema:"hitl|hotl|auto (default: the project's, else hotl); auto needs a person (or the token)"`
+	Type        string `json:"type,omitempty" jsonschema:"bug|refactor|test|architecture|security|performance|reliability|contract|database|messaging|ui_ux|accessibility|feature|debt|docs|devex"`
 	SpecID      *int64 `json:"spec_id,omitempty" jsonschema:"the spec this task is derived from"`
+	MilestoneID *int64 `json:"milestone_id,omitempty" jsonschema:"the milestone this task belongs to"`
+	ParentID    *int64 `json:"parent_id,omitempty" jsonschema:"parent task id (a subtask; grouping only, it does not make the parent wait)"`
 	Project     string `json:"project,omitempty" jsonschema:"project name to scope this task to"`
 	Role        string `json:"role,omitempty" jsonschema:"role name (default: $ACLINE_ROLE)"`
+	Token       string `json:"token,omitempty" jsonschema:"human approval token; needed for autonomy auto when the store has one enabled or the server's actor is an agent. Never read from the server's environment."`
 }
 
 type taskAddOut struct {
@@ -73,6 +78,11 @@ type taskAddOut struct {
 }
 
 func registerTaskTools(s *sdkmcp.Server, st *store.Store) {
+	addTaskListTool(s, st)
+	addTaskAddTool(s, st)
+}
+
+func addTaskListTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_task_list",
 		Description: "List work items (tasks), optionally filtered by status, area, risk, or project.",
@@ -92,24 +102,17 @@ func registerTaskTools(s *sdkmcp.Server, st *store.Store) {
 		}
 		return textResult(fmt.Sprintf("%d task(s)", len(page))), out, nil
 	})
+}
 
+func addTaskAddTool(s *sdkmcp.Server, st *store.Store) {
 	addTool(s, &sdkmcp.Tool{
 		Name:        "acline_task_add",
 		Description: "Add a work item. Does not evaluate or bypass the completion gate -- that only applies to `task done`, not to creating a task.",
 	}, func(ctx context.Context, req *sdkmcp.CallToolRequest, args taskAddArgs) (*sdkmcp.CallToolResult, taskAddOut, error) {
-		if args.Title == "" {
-			return nil, taskAddOut{}, fmt.Errorf("title is required")
-		}
-		projectID, err := resolveProject(st, args.Project)
-		if err != nil {
-			return nil, taskAddOut{}, err
-		}
-		roleID, err := resolveRole(st, args.Role, args.Project)
-		if err != nil {
-			return nil, taskAddOut{}, err
-		}
-		id, err := st.AddTask(args.Title, args.Description, args.Priority, store.TaskOpts{
-			Area: args.Area, Risk: args.Risk, Autonomy: args.Autonomy, SpecID: args.SpecID, ProjectID: projectID, RoleID: roleID,
+		id, err := app.AddTask(st, app.AddTaskRequest{
+			Title: args.Title, Description: args.Description, Priority: args.Priority, Area: args.Area, Type: args.Type,
+			Risk: args.Risk, Autonomy: args.Autonomy, SpecID: args.SpecID, MilestoneID: args.MilestoneID, ParentID: args.ParentID,
+			Token: args.Token, RoleArg: args.Role, ProjectArg: args.Project,
 		})
 		if err != nil {
 			return nil, taskAddOut{}, err

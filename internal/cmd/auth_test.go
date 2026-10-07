@@ -21,29 +21,26 @@ func (f *fakeTerminal) Read(p []byte) (int, error)  { return f.in.Read(p) }
 func (f *fakeTerminal) Write(p []byte) (int, error) { return f.out.Write(p) }
 func (f *fakeTerminal) Close() error                { return nil }
 
-func withFakeTerminal(t *testing.T, input string) *fakeTerminal {
-	t.Helper()
+// withFakeTerminal makes c's terminal a fake that reads input.
+func withFakeTerminal(c *cli, input string) *fakeTerminal {
 	tty := &fakeTerminal{in: strings.NewReader(input)}
-	prev := openTerminal
-	openTerminal = func() (terminal, error) { return tty, nil }
-	t.Cleanup(func() { openTerminal = prev })
+	c.openTerminal = func() (terminal, error) { return tty, nil }
 	return tty
 }
 
-func withNoTerminal(t *testing.T) {
-	t.Helper()
-	prev := openTerminal
-	openTerminal = func() (terminal, error) { return nil, errors.New("no tty") }
-	t.Cleanup(func() { openTerminal = prev })
+// withNoTerminal makes c run without a terminal, as an agent's shell does.
+func withNoTerminal(c *cli) {
+	c.openTerminal = func() (terminal, error) { return nil, errors.New("no tty") }
 }
 
 func TestAuthInitNeedsAHumanAtATerminal(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 
 	// An agent's shell has no terminal: it must not be able to enable a token
 	// (which would lock the human out).
-	withNoTerminal(t)
-	if err := authInitCmd.RunE(authInitCmd, nil); !errors.Is(err, errNoTerminal) {
+	withNoTerminal(c)
+	if err := c.run("auth", "init"); !errors.Is(err, errNoTerminal) {
 		t.Fatalf("init without a terminal = %v, want errNoTerminal", err)
 	}
 	if on, _ := s.ApprovalTokenEnabled(); on {
@@ -51,8 +48,8 @@ func TestAuthInitNeedsAHumanAtATerminal(t *testing.T) {
 	}
 
 	// A terminal, but the human doesn't confirm.
-	tty := withFakeTerminal(t, "no\n")
-	if err := authInitCmd.RunE(authInitCmd, nil); err == nil {
+	tty := withFakeTerminal(c, "no\n")
+	if err := c.run("auth", "init"); err == nil {
 		t.Fatal("init proceeded without the ENABLE confirmation")
 	}
 	if on, _ := s.ApprovalTokenEnabled(); on {
@@ -61,9 +58,9 @@ func TestAuthInitNeedsAHumanAtATerminal(t *testing.T) {
 	_ = tty
 
 	// Confirmed: the token is shown on the terminal, never on stdout.
-	tty = withFakeTerminal(t, "ENABLE\n")
+	tty = withFakeTerminal(c, "ENABLE\n")
 	stdout := captureStdout(t, func() {
-		if err := authInitCmd.RunE(authInitCmd, nil); err != nil {
+		if err := c.run("auth", "init"); err != nil {
 			t.Fatalf("init: %v", err)
 		}
 	})
@@ -85,7 +82,8 @@ func TestAuthInitNeedsAHumanAtATerminal(t *testing.T) {
 }
 
 func TestWithApprovalTokenPromptsOnlyWhenRequired(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	t.Setenv(approvalTokenEnv, "")
 	token, err := s.EnableApprovalToken()
 	if err != nil {
@@ -97,14 +95,14 @@ func TestWithApprovalTokenPromptsOnlyWhenRequired(t *testing.T) {
 	}
 
 	// no env, no terminal -> the store's "required" error surfaces (an agent's situation)
-	withNoTerminal(t)
-	if err := withApprovalToken("x", do); !errors.Is(err, store.ErrApprovalTokenRequired) {
+	withNoTerminal(c)
+	if err := c.withApprovalToken("x", do); !errors.Is(err, store.ErrApprovalTokenRequired) {
 		t.Fatalf("no env/no tty = %v, want required", err)
 	}
 
 	// no env, human types it at the terminal
-	tty := withFakeTerminal(t, token+"\n")
-	if err := withApprovalToken("approving task #1", do); err != nil {
+	tty := withFakeTerminal(c, token+"\n")
+	if err := c.withApprovalToken("approving task #1", do); err != nil {
 		t.Fatalf("prompted token = %v", err)
 	}
 	if !strings.Contains(tty.out.String(), "approval token for approving task #1") {
@@ -112,38 +110,35 @@ func TestWithApprovalTokenPromptsOnlyWhenRequired(t *testing.T) {
 	}
 
 	// wrong token typed
-	withFakeTerminal(t, "acl_nope\n")
-	if err := withApprovalToken("x", do); !errors.Is(err, store.ErrApprovalTokenInvalid) {
+	withFakeTerminal(c, "acl_nope\n")
+	if err := c.withApprovalToken("x", do); !errors.Is(err, store.ErrApprovalTokenInvalid) {
 		t.Fatalf("wrong typed token = %v", err)
 	}
 
 	// env token is used without prompting at all
 	t.Setenv(approvalTokenEnv, token)
-	withNoTerminal(t)
-	if err := withApprovalToken("x", do); err != nil {
+	withNoTerminal(c)
+	if err := c.withApprovalToken("x", do); err != nil {
 		t.Fatalf("env token = %v", err)
 	}
 
 	// an invalid env token is an error, not a prompt
 	t.Setenv(approvalTokenEnv, "acl_bad")
-	withFakeTerminal(t, token+"\n")
-	if err := withApprovalToken("x", do); !errors.Is(err, store.ErrApprovalTokenInvalid) {
+	withFakeTerminal(c, token+"\n")
+	if err := c.withApprovalToken("x", do); !errors.Is(err, store.ErrApprovalTokenInvalid) {
 		t.Fatalf("bad env token = %v, want invalid (no fallback prompt)", err)
 	}
 }
 
 func TestApproveCommandRequiresTheTokenWhenEnabled(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	t.Setenv(approvalTokenEnv, "")
 	id, _ := s.AddTask("t", "", "normal", store.TaskOpts{Risk: "high"})
 	token, _ := s.EnableApprovalToken()
 
-	prevBy, prevKind := approveBy, approveKind
-	approveBy, approveKind = "alice", "code_review"
-	t.Cleanup(func() { approveBy, approveKind = prevBy, prevKind })
-
-	withNoTerminal(t)
-	err := approveCmd.RunE(approveCmd, []string{itoa(id)})
+	withNoTerminal(c)
+	err := c.run("approve", "--by", "alice", "--kind", "code_review", itoa(id))
 	if !errors.Is(err, store.ErrApprovalTokenRequired) {
 		t.Fatalf("approve without token = %v", err)
 	}
@@ -153,7 +148,7 @@ func TestApproveCommandRequiresTheTokenWhenEnabled(t *testing.T) {
 
 	t.Setenv(approvalTokenEnv, token)
 	captureStdout(t, func() {
-		if err := approveCmd.RunE(approveCmd, []string{itoa(id)}); err != nil {
+		if err := c.run("approve", "--by", "alice", "--kind", "code_review", itoa(id)); err != nil {
 			t.Fatalf("approve with token = %v", err)
 		}
 	})
@@ -163,17 +158,14 @@ func TestApproveCommandRequiresTheTokenWhenEnabled(t *testing.T) {
 }
 
 func TestTaskDoneForceRequiresTheTokenWhenEnabled(t *testing.T) {
-	s := withTestStore(t)
+	c := newTestCLI(t)
+	s := c.st
 	t.Setenv(approvalTokenEnv, "")
 	id, _ := s.AddTask("t", "", "normal", store.TaskOpts{Risk: "high"})
 	token, _ := s.EnableApprovalToken()
 
-	prev := doneForce
-	doneForce = true
-	t.Cleanup(func() { doneForce = prev })
-
-	withNoTerminal(t)
-	if err := taskDoneCmd.RunE(taskDoneCmd, []string{itoa(id)}); !errors.Is(err, store.ErrApprovalTokenRequired) {
+	withNoTerminal(c)
+	if err := c.run("task", "done", "--force", itoa(id)); !errors.Is(err, store.ErrApprovalTokenRequired) {
 		t.Fatalf("force without token = %v", err)
 	}
 	if got, _ := s.GetTask(id); got.Status == "done" {
@@ -181,7 +173,7 @@ func TestTaskDoneForceRequiresTheTokenWhenEnabled(t *testing.T) {
 	}
 	t.Setenv(approvalTokenEnv, token)
 	captureStdout(t, func() {
-		if err := taskDoneCmd.RunE(taskDoneCmd, []string{itoa(id)}); err != nil {
+		if err := c.run("task", "done", "--force", itoa(id)); err != nil {
 			t.Fatalf("force with token = %v", err)
 		}
 	})

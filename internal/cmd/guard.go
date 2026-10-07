@@ -165,8 +165,9 @@ func extractSubshells(cmd string, depth int) []string {
 
 // checkBashCommand runs the policy patterns over bashScanTargets (see
 // guard_shell.go), so quoted text and heredoc bodies that are only data
-// don't trip them, while anything bash would execute still does.
-func checkBashCommand(cmd string) (bool, string) {
+// don't trip them, while anything bash would execute still does. dbPath is the
+// store in use ("" for none); reaching it through the shell is denied too.
+func checkBashCommand(dbPath, cmd string) (bool, string) {
 	for _, target := range bashScanTargets(cmd, 0) {
 		c := target.text
 		if hasRecursiveForcedRemove(c) {
@@ -186,15 +187,11 @@ func checkBashCommand(cmd string) (bool, string) {
 				return true, fmt.Sprintf("blocked: command would expose secrets/env vars (in: %s)", truncate(c, 100))
 			}
 		}
-		dbPath := ""
-		if st != nil {
-			dbPath = st.Path
-		}
 		if reason := bashSensitiveAccess(c, dbPath); reason != "" {
 			return true, fmt.Sprintf("%s (in: %s)", reason, truncate(c, 100))
 		}
 		if bashWritesProtectedVaultFile(c) {
-			return true, fmt.Sprintf("blocked: SOUL.md, role persona files under vault/roles/ and .claude/settings*.json (which run the guard) are write-protected, including via Bash — record suggested changes with: acline note add \"suggested <file> change: ...\" (in: %s)", truncate(c, 100))
+			return true, fmt.Sprintf("blocked: SOUL.md, role persona files under vault/roles/, .claude/settings*.json (which run the guard) and the files that instruct agent sessions (skills, agents, commands, hooks, .mcp.json, git hooks) are write-protected, including via Bash — record suggested changes with: acline note add \"suggested <file> change: ...\" (in: %s)", truncate(c, 100))
 		}
 	}
 	return false, ""
@@ -212,8 +209,8 @@ func checkBashCommand(cmd string) (bool, string) {
 // boundaries per role, the same category of thing SOUL.md protects, so
 // they use one check rather than a second, inconsistent one.
 var (
-	protectedVaultNameRe = regexp.MustCompile(`(?i)SOUL\.md|roles/[^/\s'"` + "`" + `]+\.md|\.claude/settings(?:\.local)?\.json`)
-	protectedVaultRdrRe  = regexp.MustCompile(`(?i)>{1,2}\|?\s*["']?[^\s;&|]*(SOUL\.md|roles/[^/\s'"` + "`" + `]+\.md|\.claude/settings(?:\.local)?\.json)`)
+	protectedVaultNameRe = regexp.MustCompile(`(?i)SOUL\.md|roles/[^/\s'"` + "`" + `]+\.md|\.claude/settings(?:\.local)?\.json|` + agentInstructionPattern)
+	protectedVaultRdrRe  = regexp.MustCompile(`(?i)>{1,2}\|?\s*["']?[^\s;&|]*(SOUL\.md|roles/[^/\s'"` + "`" + `]+\.md|\.claude/settings(?:\.local)?\.json|` + `\.claude/(?:skills|agents|commands|hooks)/|\.git/hooks/)`)
 	protectedVaultInPl   = regexp.MustCompile(`(?i)\b(sed|perl|ruby)\b.*\s-[a-zA-Z]*i`)
 	protectedVaultAnyUse = map[string]bool{"tee": true, "mv": true, "rm": true, "ln": true, "truncate": true, "chmod": true, "chown": true, "touch": true, "install": true, "dd": true}
 	protectedVaultInterp = map[string]bool{"python": true, "python3": true, "node": true, "perl": true, "ruby": true, "sh": true, "bash": true, "zsh": true}
@@ -221,11 +218,28 @@ var (
 	protectedVaultCopyTo = map[string]bool{"cp": true, "rsync": true}
 )
 
+// agentInstructionPattern names the files that instruct or configure later
+// agent sessions: skills, agent definitions, slash commands and hook scripts
+// under .claude/, the project's MCP server list (Claude Code starts the
+// processes it names) and git hooks (code that runs on the person's next
+// commit). An agent that could rewrite them could change what later sessions are
+// told or run, so they are write-protected like .claude/settings.json.
+const agentInstructionPattern = `\.claude/(?:skills|agents|commands|hooks)/|\.git/hooks/|(?:^|[/\s"'=<>(])\.mcp\.json\b`
+
+// agentInstructionRe matches a single file path (file tools): one of the
+// directories above, or a file named exactly .mcp.json.
+var agentInstructionRe = regexp.MustCompile(`(?i)\.claude/(?:skills|agents|commands|hooks)/|\.git/hooks/|(?:^|/)\.mcp\.json$`)
+
+// mcpJSONRedirectRe is a redirect whose target is a file named .mcp.json
+// (`>.mcp.json`, `> sub/.mcp.json`), which protectedVaultRdrRe cannot express
+// without also catching names that merely contain it (my.mcp.json.bak).
+var mcpJSONRedirectRe = regexp.MustCompile(`(?i)>{1,2}\|?\s*["']?(?:[^\s;&|]*/)?\.mcp\.json(?:$|[\s;&|"')])`)
+
 func bashWritesProtectedVaultFile(cmd string) bool {
 	if !protectedVaultNameRe.MatchString(cmd) {
 		return false
 	}
-	if protectedVaultRdrRe.MatchString(cmd) {
+	if protectedVaultRdrRe.MatchString(cmd) || mcpJSONRedirectRe.MatchString(cmd) {
 		return true
 	}
 	for _, segment := range segmentSplitRe.Split(cmd, -1) {
@@ -344,6 +358,9 @@ func checkProtectedVaultFile(vaultRoot, path string) (bool, string) {
 	if base := strings.ToLower(filepath.Base(resolved)); (base == "settings.json" || base == "settings.local.json") && filepath.Base(filepath.Dir(resolved)) == ".claude" {
 		return true, fmt.Sprintf("blocked: '%s' configures the guard hook and is write-protected — ask the user to change it, or run `acline init --upgrade` to restore it", path)
 	}
+	if agentInstructionRe.MatchString(filepath.ToSlash(resolved)) || agentInstructionRe.MatchString(filepath.ToSlash(path)) {
+		return true, fmt.Sprintf("blocked: '%s' instructs or configures agent sessions (a skill, agent, command, hook, .mcp.json or git hook) and is write-protected — propose the change with: acline note add \"suggested change to %s: ...\"", path, filepath.Base(path))
+	}
 	if resolved == realPath(filepath.Join(vaultRoot, "SOUL.md")) {
 		return true, "blocked: SOUL.md is write-protected — record suggested changes with: acline note add \"suggested SOUL.md change: ...\""
 	}
@@ -366,17 +383,17 @@ const guardAllProjectsEnv = "ACLINE_GUARD_ALL_PROJECTS"
 // path. Each root is resolved through realPath too: a root that is itself a
 // symlink (e.g. a vault synced via a symlinked folder) must still compare
 // correctly against a resolved candidate path.
-func allowedWriteRoots(vaultRoot string) []string {
+func allowedWriteRoots(s *store.Store, vaultRoot string) []string {
 	roots := []string{realPath(vaultRoot)}
-	if st == nil {
+	if s == nil {
 		return roots
 	}
 	if os.Getenv(guardAllProjectsEnv) != "1" {
-		if cur, err := st.ResolveCurrentProject(); err == nil && cur.Path.Valid && cur.Path.String != "" {
+		if cur, err := s.ResolveCurrentProject(); err == nil && cur.Path.Valid && cur.Path.String != "" {
 			return append(roots, realPath(cur.Path.String))
 		}
 	}
-	if projects, err := st.ListProjects(); err == nil {
+	if projects, err := s.ListProjects(); err == nil {
 		for _, p := range projects {
 			if p.Path.Valid && p.Path.String != "" {
 				roots = append(roots, realPath(p.Path.String))
@@ -386,9 +403,9 @@ func allowedWriteRoots(vaultRoot string) []string {
 	return roots
 }
 
-func checkWriteScope(vaultRoot, path string) (bool, string) {
+func checkWriteScope(s *store.Store, vaultRoot, path string) (bool, string) {
 	resolved := realPath(path)
-	for _, root := range allowedWriteRoots(vaultRoot) {
+	for _, root := range allowedWriteRoots(s, vaultRoot) {
 		if resolved == root {
 			return false, ""
 		}
@@ -430,7 +447,7 @@ func isSessionScratchpad(path, sessionID string) bool {
 
 // dbPathIsProtected additionally blocks direct Edit/Write on the SDLC
 // database/snapshot files — mutation must go through the `acline` CLI.
-// dbPath is the actual resolved store path in use (st.Path), not just the
+// dbPath is the actual resolved store path in use (Store.Path), not just the
 // default filename — a custom `--db`/`$ACLINE_DB` location is protected too,
 // including its WAL/SHM/journal sidecar files.
 func dbPathIsProtected(dbPath, path string) (bool, string) {
@@ -453,6 +470,7 @@ func dbPathIsProtected(dbPath, path string) (bool, string) {
 
 type hookPayload struct {
 	SessionID string         `json:"session_id"`
+	AgentType string         `json:"agent_type"` // the subagent (or --agent) making the call, when there is one
 	ToolName  string         `json:"tool_name"`
 	ToolInput map[string]any `json:"tool_input"`
 }
@@ -477,8 +495,8 @@ func payloadPath(payload hookPayload) string {
 // checkActivePolicy connects the policy recorded by `session start` to the
 // actual pre-tool-use enforcement path. With no active session there is no
 // session policy to apply, so the permanent guard rules remain the authority.
-func checkActivePolicy(tool, path string) (bool, string, error) {
-	allowed, reason, err := st.CheckPolicy(tool, path)
+func checkActivePolicy(s *store.Store, tool, path string) (bool, string, error) {
+	allowed, reason, err := s.CheckPolicy(tool, path)
 	if errors.Is(err, store.ErrNoActiveSession) {
 		return false, "", nil
 	}
@@ -560,74 +578,85 @@ func missingFromMatcher(matcher string) []string {
 	return missing
 }
 
-var guardVault string
-var guardDoctorRoot string
-
-var guardCmd = &cobra.Command{
-	Use:   "guard",
-	Short: "Security policy checks for Claude Code hooks",
+func newGuardCmd(c *cli) *cobra.Command {
+	var vault string
+	cmd := &cobra.Command{
+		Use:   "guard",
+		Short: "Security policy checks for Claude Code hooks",
+	}
+	cmd.PersistentFlags().StringVar(&vault, "vault", defaultVaultPath(), "path to the vault directory (default: $VAULT_PATH or ./vault)")
+	cmd.AddCommand(newGuardCheckToolCmd(c, &vault), newGuardDoctorCmd())
+	return cmd
 }
 
-var guardDoctorCmd = &cobra.Command{
-	Use:   "doctor",
-	Short: "Check this project's .claude/settings.json PreToolUse matcher against the tools guard.go actually checks",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		path := filepath.Join(guardDoctorRoot, ".claude", "settings.json")
-		data, err := os.ReadFile(path)
-		if err != nil {
-			if os.IsNotExist(err) {
-				fmt.Printf("no %s found — nothing to check (run `acline init` to scaffold one)\n", path)
+func newGuardDoctorCmd() *cobra.Command {
+	var root string
+	cmd := &cobra.Command{
+		Use:   "doctor",
+		Short: "Check this project's .claude/settings.json PreToolUse matcher against the tools guard.go actually checks",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			path := filepath.Join(root, ".claude", "settings.json")
+			data, err := os.ReadFile(path)
+			if err != nil {
+				if os.IsNotExist(err) {
+					fmt.Printf("no %s found — nothing to check (run `acline init` to scaffold one)\n", path)
+					return nil
+				}
+				return err
+			}
+			var cfg struct {
+				Hooks struct {
+					PreToolUse []struct {
+						Matcher string `json:"matcher"`
+					} `json:"PreToolUse"`
+				} `json:"hooks"`
+			}
+			if err := json.Unmarshal(data, &cfg); err != nil {
+				return fmt.Errorf("parsing %s: %w", path, err)
+			}
+			if len(cfg.Hooks.PreToolUse) == 0 {
+				fmt.Printf("%s has no PreToolUse hook — guard check-tool is never invoked for any tool\n", path)
 				return nil
 			}
-			return err
-		}
-		var cfg struct {
-			Hooks struct {
-				PreToolUse []struct {
-					Matcher string `json:"matcher"`
-				} `json:"PreToolUse"`
-			} `json:"hooks"`
-		}
-		if err := json.Unmarshal(data, &cfg); err != nil {
-			return fmt.Errorf("parsing %s: %w", path, err)
-		}
-		if len(cfg.Hooks.PreToolUse) == 0 {
-			fmt.Printf("%s has no PreToolUse hook — guard check-tool is never invoked for any tool\n", path)
-			return nil
-		}
-		anyMissing := false
-		for _, entry := range cfg.Hooks.PreToolUse {
-			missing := missingFromMatcher(entry.Matcher)
-			if len(missing) > 0 {
-				anyMissing = true
-				fmt.Printf("%s: PreToolUse matcher %q is missing %s — those tools bypass guard check-tool entirely\n", path, entry.Matcher, strings.Join(missing, ", "))
+			anyMissing := false
+			for _, entry := range cfg.Hooks.PreToolUse {
+				missing := missingFromMatcher(entry.Matcher)
+				if len(missing) > 0 {
+					anyMissing = true
+					fmt.Printf("%s: PreToolUse matcher %q is missing %s — those tools bypass guard check-tool entirely\n", path, entry.Matcher, strings.Join(missing, ", "))
+				}
 			}
-		}
-		for _, entry := range cfg.Hooks.PreToolUse {
-			if missing := missingPolicyTools(entry.Matcher); len(missing) > 0 {
-				fmt.Printf("%s: advisory: PreToolUse matcher %q does not include %s, so a session policy cannot deny those tools (run `acline init --upgrade`)\n", path, entry.Matcher, strings.Join(missing, ", "))
+			for _, entry := range cfg.Hooks.PreToolUse {
+				if missing := missingPolicyTools(entry.Matcher); len(missing) > 0 {
+					fmt.Printf("%s: advisory: PreToolUse matcher %q does not include %s, so a session policy cannot deny those tools (run `acline init --upgrade`)\n", path, entry.Matcher, strings.Join(missing, ", "))
+				}
 			}
-		}
-		if !anyMissing {
-			fmt.Printf("%s: PreToolUse matcher covers every tool guard.go checks\n", path)
-			return nil
-		}
-		return errors.New("PreToolUse matcher is missing tool coverage; see above")
-	},
+			if !anyMissing {
+				fmt.Printf("%s: PreToolUse matcher covers every tool guard.go checks\n", path)
+				return nil
+			}
+			return errors.New("PreToolUse matcher is missing tool coverage; see above")
+		},
+	}
+	cmd.Flags().StringVar(&root, "root", ".", "project root containing .claude/settings.json")
+	return cmd
 }
 
-var guardCheckToolCmd = &cobra.Command{
-	Use:   "check-tool",
-	Short: "Read a PreToolUse hook payload from stdin, print a deny decision (or nothing) to stdout",
-	RunE: func(cmd *cobra.Command, args []string) error {
-		return guardCheckTool(os.Stdin, os.Stdout)
-	},
+func newGuardCheckToolCmd(c *cli, vault *string) *cobra.Command {
+	return &cobra.Command{
+		Use:   "check-tool",
+		Short: "Read a PreToolUse hook payload from stdin, print a deny decision (or nothing) to stdout",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return guardCheckTool(c.st, *vault, os.Stdin, os.Stdout)
+		},
+	}
 }
 
-// guardCheckTool judges one PreToolUse payload read from in and writes Claude
+// guardCheckTool judges one PreToolUse payload read from in, against s and the
+// vault at vaultRoot, and writes Claude
 // Code's deny decision to out, or nothing when the call is allowed. It is the one
 // implementation behind `acline guard check-tool` and `acline hook pre-tool-use`.
-func guardCheckTool(in io.Reader, out io.Writer) error {
+func guardCheckTool(s *store.Store, vaultRoot string, in io.Reader, out io.Writer) error {
 	var payload hookPayload
 	dec := json.NewDecoder(in)
 	if err := dec.Decode(&payload); err != nil {
@@ -639,7 +668,7 @@ func guardCheckTool(in io.Reader, out io.Writer) error {
 		// Garbled input from a hook means the caller is broken or being
 		// tampered with; answering "allow" would make the guard fail open.
 		reason := fmt.Sprintf("blocked: guard could not parse the hook payload (%v)", err)
-		logEventGlobal("guard_denied", reason)
+		s.LogEventGlobal("guard_denied", reason)
 		return json.NewEncoder(out).Encode(denyOutput(reason))
 	}
 
@@ -648,30 +677,33 @@ func guardCheckTool(in io.Reader, out io.Writer) error {
 		// (the whole point of an append-only, hash-chained events
 		// table), but a hook must still answer with its deny decision
 		// even if this insert fails for some reason (e.g. a locked
-		// db) — logEventGlobal already swallows LogEvent's error for
+		// db) — LogEventGlobal already swallows LogEvent's error for
 		// exactly this "secondary side effect" reason.
-		logEventGlobal("guard_denied", fmt.Sprintf("tool=%s: %s", payload.ToolName, reason))
+		s.LogEventGlobal("guard_denied", fmt.Sprintf("tool=%s: %s", payload.ToolName, reason))
 		enc := json.NewEncoder(out)
 		return enc.Encode(denyOutput(reason))
 	}
 
 	path := payloadPath(payload)
-	if blocked, reason, err := checkActivePolicy(payload.ToolName, path); err != nil {
+	if blocked, reason, err := checkActivePolicy(s, payload.ToolName, path); err != nil {
 		return err
 	} else if blocked {
 		return deny(reason)
 	}
-	if blocked, reason := checkRoleScope(payload.ToolName, payload.ToolInput); blocked {
+	if blocked, reason := checkRoleScope(s, payload.ToolName, payload.ToolInput); blocked {
+		return deny(reason)
+	}
+	if blocked, reason := checkSubagentScope(payload.AgentType, payload.ToolName, payload.ToolInput); blocked {
 		return deny(reason)
 	}
 
 	if payload.ToolName == "Bash" {
 		cmdStr, _ := payload.ToolInput["command"].(string)
-		if blocked, reason := checkBashCommand(cmdStr); blocked {
+		if blocked, reason := checkBashCommand(s.Path, cmdStr); blocked {
 			return deny(reason)
 		}
 		if warning := checkBashCommandWarnings(cmdStr); warning != "" {
-			logEventGlobal("guard_warned", warning)
+			s.LogEventGlobal("guard_warned", warning)
 		}
 		return nil
 	}
@@ -690,26 +722,18 @@ func guardCheckTool(in io.Reader, out io.Writer) error {
 		}
 
 		if writeTools[payload.ToolName] {
-			if blocked, reason := checkProtectedVaultFile(guardVault, path); blocked {
+			if blocked, reason := checkProtectedVaultFile(vaultRoot, path); blocked {
 				return deny(reason)
 			}
-			if blocked, reason := dbPathIsProtected(st.Path, path); blocked {
+			if blocked, reason := dbPathIsProtected(s.Path, path); blocked {
 				return deny(reason)
 			}
-			if blocked, reason := checkWriteScope(guardVault, path); blocked && !isSessionScratchpad(path, payload.SessionID) {
+			if blocked, reason := checkWriteScope(s, vaultRoot, path); blocked && !isSessionScratchpad(path, payload.SessionID) {
 				return deny(reason)
 			}
 		}
 	}
 	return nil
-}
-
-func init() {
-	guardCmd.PersistentFlags().StringVar(&guardVault, "vault", defaultVaultPath(), "path to the vault directory (default: $VAULT_PATH or ./vault)")
-	guardDoctorCmd.Flags().StringVar(&guardDoctorRoot, "root", ".", "project root containing .claude/settings.json")
-	guardCmd.AddCommand(guardCheckToolCmd)
-	guardCmd.AddCommand(guardDoctorCmd)
-	rootCmd.AddCommand(guardCmd)
 }
 
 func defaultVaultPath() string {

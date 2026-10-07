@@ -59,6 +59,55 @@ type Options struct {
 	// are never at risk of being overwritten. settings.json keeps using its
 	// existing structural merge regardless of Upgrade.
 	Upgrade bool
+	// StorePath is the store the project's agents must not open directly; the
+	// settings deny Read/Edit/Write on it. Empty means the default,
+	// ~/.acline/store.db.
+	StorePath string
+}
+
+// defaultStoreRule is the path the shipped settings deny for the store.
+const defaultStoreRule = "~/.acline/**"
+
+// storeRule is the permission path that covers the store at storePath: the
+// shipped ~/.acline/** for the default store, else the database file and its
+// -wal/-shm siblings (never its whole directory, which may be the project).
+// Claude Code reads ~/ as the home directory and //abs as an absolute path.
+func storeRule(storePath, home string) string {
+	if storePath == "" {
+		return defaultStoreRule
+	}
+	abs, err := filepath.Abs(storePath)
+	if err != nil {
+		return defaultStoreRule
+	}
+	if home != "" && abs == filepath.Join(home, ".acline", "store.db") {
+		return defaultStoreRule
+	}
+	if home != "" {
+		if rel, err := filepath.Rel(home, abs); err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return "~/" + filepath.ToSlash(rel) + "*"
+		}
+	}
+	return "//" + strings.TrimPrefix(filepath.ToSlash(abs), "/") + "*"
+}
+
+// shippedSettings is the embedded settings.json with the store rules pointed
+// at storePath.
+func shippedSettings(assetPath, storePath string) ([]byte, error) {
+	data, err := assets.ReadFile(assetPath)
+	if err != nil {
+		return nil, err
+	}
+	home, _ := os.UserHomeDir()
+	rule := storeRule(storePath, home)
+	if rule == defaultStoreRule {
+		return data, nil
+	}
+	quoted, err := json.Marshal(rule)
+	if err != nil {
+		return nil, err
+	}
+	return []byte(strings.ReplaceAll(string(data), defaultStoreRule, strings.Trim(string(quoted), `"`))), nil
 }
 
 // WriteOpts is Write with Options controlling how an already-scaffolded
@@ -86,7 +135,11 @@ func WriteOpts(root string, opts Options) (Result, error) {
 		}
 		target := filepath.Join(root, ".claude", rel)
 		if rel == "settings.json" {
-			return mergeSettings(assetPath, target, &result)
+			shipped, err := shippedSettings(assetPath, opts.StorePath)
+			if err != nil {
+				return err
+			}
+			return mergeSettings(shipped, target, &result)
 		}
 		upgradable := opts.Upgrade && strings.HasPrefix(rel, "skills"+string(filepath.Separator))
 		if existing, err := os.ReadFile(target); err == nil {
@@ -148,11 +201,7 @@ func filePermFor(target string) os.FileMode {
 	return 0o644
 }
 
-func mergeSettings(assetPath, target string, result *Result) error {
-	shipped, err := assets.ReadFile(assetPath)
-	if err != nil {
-		return err
-	}
+func mergeSettings(shipped []byte, target string, result *Result) error {
 	if _, err := os.Stat(target); os.IsNotExist(err) {
 		if err := os.MkdirAll(filepath.Dir(target), 0o755); err != nil {
 			return err
@@ -418,11 +467,11 @@ func RoleContract(name string) (string, bool) {
 	return strings.TrimSpace(s), true
 }
 
-// AgentTools returns the tools a built-in role's agent stub grants (the `tools:`
+// agentTools returns the tools a built-in role's agent stub grants (the `tools:`
 // line of assets/agents/<name>.md), or false for a role acline ships no stub for
-// (a project's own role, manager, scrummaster). The guard uses it to hold a
-// session running as a read-only role to its contract.
-func AgentTools(name string) ([]string, bool) {
+// (a project's own role, manager, scrummaster). A stub that lists neither Edit
+// nor Write describes a read-only role, which must be one roles.ReadOnly names.
+func agentTools(name string) ([]string, bool) {
 	if name == "" || strings.ContainsAny(name, `/\.`) {
 		return nil, false
 	}
@@ -450,21 +499,4 @@ func AgentTools(name string) ([]string, bool) {
 		}
 	}
 	return nil, false
-}
-
-// RoleIsReadOnly reports whether a built-in role's contract grants no file
-// writes (its agent stub lists neither Edit nor Write). The guard denies such a
-// session's writes, and the store refuses an agent that tries to end one, so
-// the contract and both enforcements read the same stub.
-func RoleIsReadOnly(name string) bool {
-	tools, ok := AgentTools(name)
-	if !ok {
-		return false
-	}
-	for _, t := range tools {
-		if t == "Edit" || t == "Write" {
-			return false
-		}
-	}
-	return true
 }
