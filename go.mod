@@ -1,10 +1,10 @@
 module acline
 
-go 1.25.5
+go 1.26
 
 require (
 	github.com/modelcontextprotocol/go-sdk v1.8.0
-	github.com/ows4444/tui v0.1.0
+	github.com/ows4444/tui v0.2.0
 	github.com/spf13/cobra v1.10.2
 	modernc.org/sqlite v1.57.0
 )

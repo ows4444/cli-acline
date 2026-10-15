@@ -2,6 +2,12 @@
 
 ## Unreleased
 
+### Changed
+
+- Depends on tui v0.2.0, up from v0.1.0, and so needs Go 1.26 or later (the
+  module said 1.25.5). The command palette is focused with `Focus` instead of
+  the removed `Init`.
+
 ## 0.2.0 - 2026-10-08
 
 A terminal UI, and a gate that is harder to satisfy without the work being verified. **Several of these change behaviour**; the ones marked ⚠ can stop a workflow that worked on 0.1.0.
