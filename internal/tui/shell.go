@@ -281,7 +281,9 @@ func (m model) openPalette() (model, tk.Cmd) {
 	}
 	m.palette = commandpalette.New(cmds...)
 	m.mode = modePalette
-	return m, m.palette.Init()
+	// Focus has a pointer receiver: take its Cmd before m is copied out.
+	cmd := m.palette.Focus()
+	return m, cmd
 }
 
 func (m model) openProjects() (model, tk.Cmd) {
